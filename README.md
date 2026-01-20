@@ -157,6 +157,7 @@ A Discord bot written in Go that generates secure, time-limited invitation links
    AUTHENTIK_TOKEN=your_authentik_api_token_here
    AUTHENTIK_FLOW_SLUG=default-enrollment-flow
    INVITE_EXPIRATION_HOURS=24
+   COMMAND_CHANNEL_ID=1234567890123456789
    ```
    
    **Reference your values from the Prerequisites section above:**
@@ -165,6 +166,7 @@ A Discord bot written in Go that generates secure, time-limited invitation links
    - `AUTHENTIK_TOKEN` - From Authentik Tokens & App Passwords
    - `AUTHENTIK_FLOW_SLUG` - From Authentik Flows page
    - `INVITE_EXPIRATION_HOURS` - Optional, defaults to 24
+   - `COMMAND_CHANNEL_ID` - Optional, restricts commands to one channel
 
 3. Start the bot:
    ```bash
@@ -242,8 +244,7 @@ All configuration is done through environment variables:
 | `AUTHENTIK_URL` | Yes | Base URL of Authentik instance | `https://authentik.example.com` |
 | `AUTHENTIK_TOKEN` | Yes | Authentik API token with invitation permissions | `gho_16C7e42F292c6912E7710c838...` |
 | `AUTHENTIK_FLOW_SLUG` | Yes | Slug of the enrollment/invitation flow | `default-enrollment-flow` |
-| `INVITE_EXPIRATION_HOURS` | No | Default expiration time in hours (default: 24) | `48` |
-
+| `INVITE_EXPIRATION_HOURS` | No | Default expiration time in hours (default: 24) | `48` || `COMMAND_CHANNEL_ID` | No | Discord channel ID to restrict commands to (omit for all channels) | `1234567890123456789` |
 ### Getting Authentik API Token
 
 1. Log in to your Authentik admin panel

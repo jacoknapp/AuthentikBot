@@ -19,6 +19,10 @@ services:
       
       # Optional: Default invite expiration in hours (default: 24)
       INVITE_EXPIRATION_HOURS: ${INVITE_EXPIRATION_HOURS:-24}
+      
+      # Optional: Restrict commands to a specific Discord channel ID
+      # Leave empty to allow commands in all channels
+      COMMAND_CHANNEL_ID: ${COMMAND_CHANNEL_ID:-}
     
     networks:
       - authentik-bot-network

@@ -27,6 +27,7 @@ type Config struct {
 	AuthentikFlowSlug  string
 	DefaultExpiration  int64    // in hours
 	ImmutableUsernames []string // users that cannot be added/removed from groups
+	CommandChannelID   string   // optional: restrict commands to specific channel
 }
 
 type InviteRequest struct {
@@ -79,6 +80,7 @@ func init() {
 	config.AuthentikURL = os.Getenv("AUTHENTIK_URL")
 	config.AuthentikToken = os.Getenv("AUTHENTIK_TOKEN")
 	config.AuthentikFlowSlug = os.Getenv("AUTHENTIK_FLOW_SLUG")
+	config.CommandChannelID = os.Getenv("COMMAND_CHANNEL_ID") // optional
 
 	// Parse immutable usernames (comma-separated)
 	immutableStr := os.Getenv("IMMUTABLE_USERNAMES")
@@ -222,6 +224,18 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		return
 	}
 
+	// Check if command is allowed in this channel
+	if !isCommandAllowed(i.ChannelID) {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "❌ Commands can only be used in the designated channel.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
 	if i.ApplicationCommandData().Name == "invite" {
 		handleInviteCommand(s, i)
 	} else if i.ApplicationCommandData().Name == "group" {
@@ -229,6 +243,15 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	} else if i.ApplicationCommandData().Name == "user" {
 		handleUserCommand(s, i)
 	}
+}
+
+func isCommandAllowed(channelID string) bool {
+	// If no channel restriction is set, allow all channels
+	if config.CommandChannelID == "" {
+		return true
+	}
+	// Only allow if the command is in the configured channel
+	return channelID == config.CommandChannelID
 }
 
 func handleInviteCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
