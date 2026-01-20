@@ -1,8 +1,8 @@
-![Authentik Discord Bot Banner](assets/banner.svg)
+![Authentik Discord Bot Banner](assets/banner.png)
 
 # Authentik Discord Invite Bot
 
-![Bot Icon](assets/icon.svg?raw=true)
+![Bot Icon](assets/icon.png)
 
 A Discord bot written in Go that generates secure, time-limited invitation links from Authentik identity provider. When users run `/invite` in Discord, the bot creates a new Authentik invite with a customizable expiration time and posts the link in a code block.
 
