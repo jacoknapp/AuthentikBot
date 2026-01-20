@@ -49,7 +49,7 @@ type InviteResponse struct {
 }
 
 type User struct {
-	Pk       int64  `json:"pk"`
+	Pk       string `json:"pk"`
 	Username string `json:"username"`
 	Email    string `json:"email"`
 	Name     string `json:"name"`
@@ -62,10 +62,10 @@ type UsersResponse struct {
 }
 
 type Group struct {
-	Pk       int64   `json:"pk"`
-	Name     string  `json:"name"`
-	Members  []int64 `json:"members"`
-	ParentPk *int64  `json:"parent"`
+	Pk       string   `json:"pk"`
+	Name     string   `json:"name"`
+	Members  []string `json:"members"`
+	ParentPk *string  `json:"parent"`
 }
 
 type GroupsResponse struct {
@@ -739,7 +739,7 @@ func addUserToGroup(username, groupName string) (string, error) {
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/api/v3/core/groups/%d/", strings.TrimRight(config.AuthentikURL, "/"), group.Pk)
+	url := fmt.Sprintf("%s/api/v3/core/groups/%s/", strings.TrimRight(config.AuthentikURL, "/"), group.Pk)
 	req, err := http.NewRequest("PATCH", url, bytes.NewBuffer(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
@@ -780,7 +780,7 @@ func removeUserFromGroup(username, groupName string) (string, error) {
 
 	// Check if user is in group and remove
 	found := false
-	newMembers := make([]int64, 0)
+	newMembers := make([]string, 0)
 	for _, memberID := range group.Members {
 		if memberID == user.Pk {
 			found = true
@@ -800,7 +800,7 @@ func removeUserFromGroup(username, groupName string) (string, error) {
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/api/v3/core/groups/%d/", strings.TrimRight(config.AuthentikURL, "/"), group.Pk)
+	url := fmt.Sprintf("%s/api/v3/core/groups/%s/", strings.TrimRight(config.AuthentikURL, "/"), group.Pk)
 	req, err := http.NewRequest("PATCH", url, bytes.NewBuffer(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
