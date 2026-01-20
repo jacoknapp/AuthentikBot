@@ -130,7 +130,9 @@ func main() {
 		log.Fatal("Error opening Discord session:", err)
 	}
 
-	// Register slash command
+	// Register/update slash commands on startup
+	log.Println("🔄 Syncing slash commands...")
+	time.Sleep(2 * time.Second) // Wait for Discord to fully ready
 	registerCommands(dg)
 
 	defer dg.Close()
@@ -184,16 +186,18 @@ func registerCommands(s *discordgo.Session) {
 					},
 				},
 				{
-					Type:        discordgo.ApplicationCommandOptionString,
-					Name:        "group",
-					Description: "Group name",
-					Required:    false,
+					Type:         discordgo.ApplicationCommandOptionString,
+					Name:         "group",
+					Description:  "Group name",
+					Required:     false,
+					Autocomplete: true,
 				},
 				{
-					Type:        discordgo.ApplicationCommandOptionString,
-					Name:        "username",
-					Description: "Username to add or remove",
-					Required:    false,
+					Type:         discordgo.ApplicationCommandOptionString,
+					Name:         "username",
+					Description:  "Username to add or remove",
+					Required:     false,
+					Autocomplete: true,
 				},
 			},
 		},
@@ -214,16 +218,26 @@ func registerCommands(s *discordgo.Session) {
 		},
 	}
 
+	// Use BulkOverwrite to ensure all commands are synced (removes old commands too)
 	registeredCommands, err := s.ApplicationCommandBulkOverwrite(s.State.User.ID, "", commands)
 	if err != nil {
-		log.Printf("Error registering commands: %v", err)
+		log.Printf("❌ Error registering commands: %v", err)
 		return
 	}
 
-	log.Printf("Successfully registered %d commands", len(registeredCommands))
+	log.Printf("✅ Successfully registered %d commands", len(registeredCommands))
+	for _, cmd := range registeredCommands {
+		log.Printf("   • /%s", cmd.Name)
+	}
 }
 
 func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	// Handle autocomplete interactions
+	if i.Type == discordgo.InteractionApplicationCommandAutocomplete {
+		handleAutocomplete(s, i)
+		return
+	}
+
 	if i.Type != discordgo.InteractionApplicationCommand {
 		return
 	}
@@ -246,6 +260,94 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		handleGroupCommand(s, i)
 	} else if i.ApplicationCommandData().Name == "user" {
 		handleUserCommand(s, i)
+	}
+}
+
+func handleAutocomplete(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	data := i.ApplicationCommandData()
+
+	if data.Name != "group" {
+		return
+	}
+
+	var focusedOption string
+	var currentInput string
+
+	// Find which option is focused
+	for _, opt := range data.Options {
+		if opt.Focused {
+			focusedOption = opt.Name
+			currentInput = strings.ToLower(opt.StringValue())
+			break
+		}
+	}
+
+	var choices []*discordgo.ApplicationCommandOptionChoice
+
+	switch focusedOption {
+	case "group":
+		// Fetch groups from Authentik
+		groups, err := getAllGroups()
+		if err != nil {
+			log.Printf("Autocomplete error fetching groups: %v", err)
+			choices = []*discordgo.ApplicationCommandOptionChoice{}
+		} else {
+			// Filter and sort groups by input
+			for _, g := range groups {
+				if currentInput == "" || strings.Contains(strings.ToLower(g.Name), currentInput) {
+					choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
+						Name:  g.Name,
+						Value: g.Name,
+					})
+					// Discord limits autocomplete to 25 choices
+					if len(choices) >= 25 {
+						break
+					}
+				}
+			}
+		}
+
+	case "username":
+		// Fetch users from Authentik
+		users, err := getAllUsers()
+		if err != nil {
+			log.Printf("Autocomplete error fetching users: %v", err)
+			choices = []*discordgo.ApplicationCommandOptionChoice{}
+		} else {
+			// Filter out immutable users
+			immutable := map[string]bool{}
+			for _, u := range config.ImmutableUsernames {
+				immutable[strings.ToLower(strings.TrimSpace(u))] = true
+			}
+
+			// Filter and sort users by input
+			for _, u := range users {
+				if immutable[strings.ToLower(u.Username)] {
+					continue
+				}
+				if currentInput == "" || strings.Contains(strings.ToLower(u.Username), currentInput) {
+					choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
+						Name:  u.Username,
+						Value: u.Username,
+					})
+					// Discord limits autocomplete to 25 choices
+					if len(choices) >= 25 {
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// Respond with the choices
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionApplicationCommandAutocompleteResult,
+		Data: &discordgo.InteractionResponseData{
+			Choices: choices,
+		},
+	})
+	if err != nil {
+		log.Printf("Error responding to autocomplete: %v", err)
 	}
 }
 
