@@ -29,34 +29,71 @@ A Discord bot written in Go that generates secure, time-limited invitation links
 2. Enter a name: `Authentik Invite Bot` (or your preferred name)
 3. Click **Create**
 
-#### Step 2: Configure Bot
+#### Step 2: Configure Bot as Private
+
+> ⚠️ **Important:** Keep `bot_public` disabled to ensure only you (the owner) can add this bot to servers.
+
 1. Navigate to **Bot** tab (left sidebar)
-2. Click **Add Bot**
-3. Under **TOKEN** section:
-   - Click **Copy** to copy your bot token
-   - ⚠️ **IMPORTANT:** Keep this token secure! Never share it or commit to version control.
-   - **This becomes your `DISCORD_TOKEN`** ✓
+2. Scroll down to **Authorization Flow** section
+3. Ensure **PUBLIC BOT** is **UNCHECKED** ✓
+   - This restricts bot invitations to the owner account only
+   - No one else can use an invite link, even if they have it
+4. Ensure **REQUIRES OAUTH2 CODE GRANT** is **UNCHECKED** ✓
+   - This allows simple bot authorization without complex OAuth2 flow
+   - Only enable this if you need to request additional user scopes
 
-#### Step 3: Enable Permissions
-1. Go to **Privileged Gateway Intents** section
-2. Enable:
-   - ✅ Message Content Intent (if needed for your server)
+#### Step 2b: Disable Install Link (Private Mode)
 
-#### Step 4: Set OAuth2 Scopes & Permissions
-1. Navigate to **OAuth2** tab (left sidebar)
+> For a truly private bot, disable the automatic install link in Discord.
+
+1. Navigate to **Installation** tab (left sidebar)
+2. Go to **Install Link** section
+3. Select **None** ✓
+   - This disables the "Add App" button on your bot's profile
+   - Users won't see an automatic invite link
+   - You must manually share the OAuth2 URL from Step 3
+
+> 💡 **Note:** With `bot_public` disabled and install link disabled, you have complete control. Only you (the owner) can add the bot to servers by using the OAuth2 URL you generate.
+
+#### Step 3: Get OAuth2 Credentials
+
+1. Navigate to **OAuth2 → URL Generator** tab (left sidebar)
 2. Under **SCOPES**, select:
    - ✅ `bot`
    - ✅ `applications.commands`
-3. Under **PERMISSIONS**, select:
+3. Under **BOT PERMISSIONS** (appears after selecting `bot` scope), select:
    - ✅ `Send Messages`
-   - ✅ `Use Application Commands`
+   - ✅ `Manage Messages` (required to delete messages after 5 minutes)
+4. Scroll down to **GENERATED URL** section
+5. Copy the URL → Save this for Step 6 ✓
 
-#### Step 5: Invite Bot to Server
-1. Under **SCOPES** section, copy the generated URL
-2. Open the URL in your browser
+> 🔒 **Security:** This URL will only work when you (the owner) are logged in. Others attempting to use it will see "Only the owner can add this bot."
+
+#### Step 4: Configure Bot Token
+
+1. Still on the **Bot** tab (left sidebar)
+2. Click **Reset Token** (or **Copy** if it's a new bot)
+3. Under **TOKEN** section:
+   - Copy your bot token
+   - ⚠️ **IMPORTANT:** Keep this token secure! Never share it or commit to version control.
+   - **This becomes your `DISCORD_TOKEN`** ✓
+
+#### Step 5: Enable Privileged Intents (if needed)
+1. Still on the **Bot** tab, scroll to **Privileged Gateway Intents** section
+2. Enable (only if your bot needs to read message content):
+   - ✅ Message Content Intent
+
+> 💡 **Note:** This bot doesn't require Message Content Intent by default.
+
+#### Step 6: Invite Bot to Your Server
+1. Take the **Generated URL** you copied from Step 3
+2. Open the URL in your browser (while logged in as the bot owner)
 3. Select your Discord server from the dropdown
 4. Click **Authorize**
 5. Complete the CAPTCHA if prompted
+5. Select your Discord server from the dropdown
+6. Click **Authorize**
+7. Complete the CAPTCHA if prompted
 
 **Result:** Your bot is now in your Discord server! → `DISCORD_TOKEN` ✓
 
@@ -88,9 +125,13 @@ A Discord bot written in Go that generates secure, time-limited invitation links
 2. Navigate to **Administration → System → Tokens & App Passwords** (left sidebar)
 3. Click **Create** button (top right)
 4. Fill in the form:
-   - **Name:** `Discord Bot` (or descriptive name)
+   - **Identifier/Name:** `Discord Bot` (or any descriptive name)
+   - **Intent:** Select **API Token**
+     - API Tokens are for programmatic API access (Bearer token)
+     - Do not use "App password" here — those are for flow executor logins
+   - **User:** Choose an account that has permission to manage invitations/groups
    - **Expiration:** Set a date (recommended) or leave empty
-   - **Permissions:** Grant invitation management permissions
+   - **Permissions:** Ensure the chosen user has invitation management rights
 5. Click **Create**
 6. ⚠️ **IMMEDIATELY copy the token value** (you won't see it again!)
 7. This is your `AUTHENTIK_TOKEN` ✓
@@ -272,16 +313,16 @@ The message will be automatically deleted after 5 minutes from Discord, but user
 
 ### Group Management Command
 
-Manage group membership in Authentik directly from Discord:
+Manage group membership and list groups in Authentik directly from Discord:
 
 ```
 /group action:add group:developers username:john.doe
 ```
 
 **Parameters:**
-- `action`: Either `add` or `remove`
-- `group`: The name of the Authentik group
-- `username`: The username to add or remove from the group
+- `action`: Either `add`, `remove`, or `list`
+- `group`: The name of the Authentik group (required for `add`/`remove`, omitted for `list`)
+- `username`: The username to add or remove from the group (required for `add`/`remove`)
 
 **Examples:**
 
@@ -304,6 +345,23 @@ Remove a user from a group:
 ```
 ✅ User 'bob.jones' removed from group 'developers'
 ```
+
+List all groups (paginated):
+```
+/group action:list
+```
+
+**Bot Response:**
+```
+Groups (12 total):
+developers — Development team
+admins — System administrators
+support — Support team
+marketing — Marketing department
+... (multiple pages if many groups)
+```
+
+The list is automatically paginated and sent in code blocks if the output is long.
 
 **Immutable Users:** Users listed in the `IMMUTABLE_USERNAMES` configuration cannot be added or removed from groups. Attempting to modify them will result in an error:
 ```
