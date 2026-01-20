@@ -310,6 +310,42 @@ func TestBuildGroupTablePages(t *testing.T) {
 	}
 }
 
+func TestValidateGroupActionInputs(t *testing.T) {
+	testCases := []struct {
+		name          string
+		action        string
+		groupName     string
+		username      string
+		expectError   bool
+		errorContains string
+	}{
+		{name: "Add missing group", action: "add", groupName: "", username: "user1", expectError: true, errorContains: "group is required"},
+		{name: "Add missing username", action: "add", groupName: "devs", username: "", expectError: true, errorContains: "username is required"},
+		{name: "Remove missing both", action: "remove", groupName: "  ", username: " ", expectError: true, errorContains: "group and username"},
+		{name: "List without inputs allowed", action: "list", groupName: "", username: "", expectError: false},
+		{name: "Add with inputs", action: "add", groupName: "devs", username: "user1", expectError: false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateGroupActionInputs(tc.action, tc.groupName, tc.username)
+			if tc.expectError {
+				if err == nil {
+					t.Fatalf("expected error but got nil")
+				}
+				if tc.errorContains != "" && !strings.Contains(err.Error(), tc.errorContains) {
+					t.Fatalf("expected error to contain '%s', got '%v'", tc.errorContains, err)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+		})
+	}
+}
+
 func TestGroupAndUserStructs(t *testing.T) {
 	// Test Group struct unmarshaling
 	groupJSON := `{"pk":"123","name":"test-group","users":[1,2,3],"parent":null}`
@@ -322,12 +358,12 @@ func TestGroupAndUserStructs(t *testing.T) {
 	}
 
 	// Test User struct unmarshaling
-	userJSON := `{"pk":"456","num_pk":42,"username":"testuser","email":"test@example.com","name":"Test User"}`
+	userJSON := `{"pk":456,"username":"testuser","email":"test@example.com","name":"Test User"}`
 	var user User
 	if err := json.Unmarshal([]byte(userJSON), &user); err != nil {
 		t.Errorf("failed to unmarshal user: %v", err)
 	}
-	if user.Pk != "456" || user.NumPk != 42 || user.Username != "testuser" || user.Email != "test@example.com" {
+	if user.Pk != 456 || user.Username != "testuser" || user.Email != "test@example.com" {
 		t.Errorf("user unmarshaling incorrect: %+v", user)
 	}
 }
@@ -385,8 +421,8 @@ func TestEllipsizeEdgeCases(t *testing.T) {
 func TestUsersResponseStructure(t *testing.T) {
 	respJSON := `{
 		"results": [
-			{"pk":"uuid-1","num_pk":1,"username":"user1","email":"user1@example.com","name":"User One"},
-			{"pk":"uuid-2","num_pk":2,"username":"user2","email":"user2@example.com","name":"User Two"}
+			{"pk":1,"username":"user1","email":"user1@example.com","name":"User One"},
+			{"pk":2,"username":"user2","email":"user2@example.com","name":"User Two"}
 		],
 		"next": "https://example.com/api/v3/core/users/?page=2"
 	}`

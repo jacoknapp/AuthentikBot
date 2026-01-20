@@ -494,6 +494,27 @@ func deleteMessageAfterDelay(s *discordgo.Session, channelID, messageID string, 
 	log.Printf("Invite message deleted after 5 minutes (message ID: %s)", messageID)
 }
 
+func validateGroupActionInputs(action, groupName, username string) error {
+	if action != "add" && action != "remove" {
+		return nil
+	}
+
+	trimmedGroup := strings.TrimSpace(groupName)
+	trimmedUser := strings.TrimSpace(username)
+
+	if trimmedGroup == "" && trimmedUser == "" {
+		return fmt.Errorf("group and username are required for %s action", action)
+	}
+	if trimmedGroup == "" {
+		return fmt.Errorf("group is required for %s action", action)
+	}
+	if trimmedUser == "" {
+		return fmt.Errorf("username is required for %s action", action)
+	}
+
+	return nil
+}
+
 func handleGroupCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
@@ -576,6 +597,16 @@ func handleGroupCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			Components: &components,
 		})
 		go deleteMessageAfterDelay(s, i.ChannelID, m.ID, 5*time.Minute)
+		return
+	}
+
+	if err := validateGroupActionInputs(action, groupName, username); err != nil {
+		m, _ := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+			Content: stringPtr("❌ " + err.Error()),
+		})
+		if m != nil {
+			go deleteMessageAfterDelay(s, i.ChannelID, m.ID, 5*time.Minute)
+		}
 		return
 	}
 
