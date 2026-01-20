@@ -63,10 +63,10 @@ type UsersResponse struct {
 }
 
 type Group struct {
-	Pk       string   `json:"pk"`
-	Name     string   `json:"name"`
-	Members  []int64  `json:"users"`
-	ParentPk *string  `json:"parent"`
+	Pk       string  `json:"pk"`
+	Name     string  `json:"name"`
+	Members  []int64 `json:"users"`
+	ParentPk *string `json:"parent"`
 }
 
 type GroupsResponse struct {
