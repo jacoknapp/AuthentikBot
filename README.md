@@ -1,4 +1,8 @@
+![Authentik Discord Bot Banner](assets/banner.svg)
+
 # Authentik Discord Invite Bot
+
+![Bot Icon](assets/icon.svg?raw=true)
 
 A Discord bot written in Go that generates secure, time-limited invitation links from Authentik identity provider. When users run `/invite` in Discord, the bot creates a new Authentik invite with a customizable expiration time and posts the link in a code block.
 
@@ -16,62 +20,85 @@ A Discord bot written in Go that generates secure, time-limited invitation links
 
 ## Prerequisites
 
-### Discord Bot Setup (Step-by-Step)
+### 📋 Discord Bot Setup
 
-1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
-2. Click **New Application** button
-3. Enter a name (e.g., "Authentik Invite Bot") and click **Create**
-4. Go to the **Bot** tab on the left sidebar
-5. Click **Add Bot**
-6. Under **TOKEN**, click **Copy** to copy your bot token
-   - ⚠️ **Keep this token secret!** Store it safely
-7. Go to **Privileged Gateway Intents** section and enable:
-   - Message Content Intent (if needed)
-8. Go to the **OAuth2** tab on the left sidebar
-9. Under **SCOPES**, select:
-   - `bot`
-   - `applications.commands`
-10. Under **PERMISSIONS**, select:
-    - `Send Messages`
-    - `Use Application Commands`
-11. Copy the URL from the **SCOPES** section
-12. Open that URL in a browser to invite the bot to your Discord server
-13. Select your server and click **Authorize**
+> **Location:** [Discord Developer Portal](https://discord.com/developers/applications)
 
-**You now have your `DISCORD_TOKEN`** ✓
+#### Step 1: Create Application
+1. Click **New Application** button
+2. Enter a name: `Authentik Invite Bot` (or your preferred name)
+3. Click **Create**
 
-### Authentik Setup (Step-by-Step)
+#### Step 2: Configure Bot
+1. Navigate to **Bot** tab (left sidebar)
+2. Click **Add Bot**
+3. Under **TOKEN** section:
+   - Click **Copy** to copy your bot token
+   - ⚠️ **IMPORTANT:** Keep this token secure! Never share it or commit to version control.
+   - **This becomes your `DISCORD_TOKEN`** ✓
+
+#### Step 3: Enable Permissions
+1. Go to **Privileged Gateway Intents** section
+2. Enable:
+   - ✅ Message Content Intent (if needed for your server)
+
+#### Step 4: Set OAuth2 Scopes & Permissions
+1. Navigate to **OAuth2** tab (left sidebar)
+2. Under **SCOPES**, select:
+   - ✅ `bot`
+   - ✅ `applications.commands`
+3. Under **PERMISSIONS**, select:
+   - ✅ `Send Messages`
+   - ✅ `Use Application Commands`
+
+#### Step 5: Invite Bot to Server
+1. Under **SCOPES** section, copy the generated URL
+2. Open the URL in your browser
+3. Select your Discord server from the dropdown
+4. Click **Authorize**
+5. Complete the CAPTCHA if prompted
+
+**Result:** Your bot is now in your Discord server! → `DISCORD_TOKEN` ✓
+
+### 🔐 Authentik Setup
 
 #### Finding Your Authentik URL
-
 1. Open your Authentik instance in a browser (e.g., `https://authentik.example.com`)
-2. Note the base URL - this is your `AUTHENTIK_URL` ✓
+2. The base URL is your `AUTHENTIK_URL` ✓
+
+**Example:** `https://authentik.example.com` → `AUTHENTIK_URL` ✓
 
 #### Finding Your Authentik Flow Slug
-
-1. Log in to your Authentik admin panel
-2. Go to **Flows & Stages → Flows** in the left sidebar
-3. Look for an enrollment or invitation flow (commonly named):
-   - `default-enrollment-flow`
-   - `enrollment`
-   - `invite`
-   - Or any custom enrollment flow you've created
+1. Log in to **Authentik Admin Panel**
+2. Navigate to **Flows & Stages → Flows** (left sidebar)
+3. Look for an enrollment or invitation flow:
+   - 🎯 Common names:
+     - `default-enrollment-flow`
+     - `enrollment`
+     - `invite`
+     - Or your custom enrollment flow
 4. Click on the flow to open it
-5. Look at the URL or the **Slug** field on the flow details page
-6. Note the slug value - this is your `AUTHENTIK_FLOW_SLUG` ✓
+5. Look at the **Slug** field (in the flow details)
+6. Note the slug value → `AUTHENTIK_FLOW_SLUG` ✓
+
+**Example:** If slug is `enrollment`, then `AUTHENTIK_FLOW_SLUG=enrollment` ✓
 
 #### Creating Your Authentik API Token
-
-1. Log in to your Authentik admin panel
-2. Go to **Administration → System → Tokens & App Passwords** (left sidebar)
-3. Click the **Create** button in the top right
+1. Log in to **Authentik Admin Panel**
+2. Navigate to **Administration → System → Tokens & App Passwords** (left sidebar)
+3. Click **Create** button (top right)
 4. Fill in the form:
-   - **Name**: "Discord Bot" (or any descriptive name)
-   - **Expiration**: Choose a date or leave empty for no expiration
-   - **Permissions**: Ensure it has permissions for invitation management
+   - **Name:** `Discord Bot` (or descriptive name)
+   - **Expiration:** Set a date (recommended) or leave empty
+   - **Permissions:** Grant invitation management permissions
 5. Click **Create**
-6. **IMPORTANT**: Copy the token value immediately (you won't see it again!)
+6. ⚠️ **IMMEDIATELY copy the token value** (you won't see it again!)
 7. This is your `AUTHENTIK_TOKEN` ✓
+
+**Result:** You have all three Authentik credentials:
+- `AUTHENTIK_URL` ✓
+- `AUTHENTIK_FLOW_SLUG` ✓
+- `AUTHENTIK_TOKEN` ✓
 
 ## Installation
 
