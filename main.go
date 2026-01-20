@@ -166,9 +166,13 @@ func registerCommands(s *discordgo.Session) {
 				{
 					Type:        discordgo.ApplicationCommandOptionString,
 					Name:        "action",
-					Description: "Add or remove user from group",
+					Description: "Action to perform",
 					Required:    true,
 					Choices: []*discordgo.ApplicationCommandOptionChoice{
+						{
+							Name:  "list",
+							Value: "list",
+						},
 						{
 							Name:  "add",
 							Value: "add",
@@ -183,13 +187,13 @@ func registerCommands(s *discordgo.Session) {
 					Type:        discordgo.ApplicationCommandOptionString,
 					Name:        "group",
 					Description: "Group name",
-					Required:    true,
+					Required:    false,
 				},
 				{
 					Type:        discordgo.ApplicationCommandOptionString,
 					Name:        "username",
 					Description: "Username to add or remove",
-					Required:    true,
+					Required:    false,
 				},
 			},
 		},
