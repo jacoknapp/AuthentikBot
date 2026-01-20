@@ -312,7 +312,7 @@ func TestBuildGroupTablePages(t *testing.T) {
 
 func TestGroupAndUserStructs(t *testing.T) {
 	// Test Group struct unmarshaling
-	groupJSON := `{"pk":"123","name":"test-group","members":[1,2,3],"parent":null}`
+	groupJSON := `{"pk":"123","name":"test-group","users":[1,2,3],"parent":null}`
 	var group Group
 	if err := json.Unmarshal([]byte(groupJSON), &group); err != nil {
 		t.Errorf("failed to unmarshal group: %v", err)
@@ -322,12 +322,12 @@ func TestGroupAndUserStructs(t *testing.T) {
 	}
 
 	// Test User struct unmarshaling
-	userJSON := `{"pk":456,"username":"testuser","email":"test@example.com","name":"Test User"}`
+	userJSON := `{"pk":"456","num_pk":42,"username":"testuser","email":"test@example.com","name":"Test User"}`
 	var user User
 	if err := json.Unmarshal([]byte(userJSON), &user); err != nil {
 		t.Errorf("failed to unmarshal user: %v", err)
 	}
-	if user.Pk != 456 || user.Username != "testuser" || user.Email != "test@example.com" {
+	if user.Pk != "456" || user.NumPk != 42 || user.Username != "testuser" || user.Email != "test@example.com" {
 		t.Errorf("user unmarshaling incorrect: %+v", user)
 	}
 }
@@ -385,8 +385,8 @@ func TestEllipsizeEdgeCases(t *testing.T) {
 func TestUsersResponseStructure(t *testing.T) {
 	respJSON := `{
 		"results": [
-			{"pk":1,"username":"user1","email":"user1@example.com","name":"User One"},
-			{"pk":2,"username":"user2","email":"user2@example.com","name":"User Two"}
+			{"pk":"uuid-1","num_pk":1,"username":"user1","email":"user1@example.com","name":"User One"},
+			{"pk":"uuid-2","num_pk":2,"username":"user2","email":"user2@example.com","name":"User Two"}
 		],
 		"next": "https://example.com/api/v3/core/users/?page=2"
 	}`
@@ -407,8 +407,8 @@ func TestUsersResponseStructure(t *testing.T) {
 func TestGroupsResponseStructure(t *testing.T) {
 	respJSON := `{
 		"results": [
-			{"pk":"1","name":"group1","members":[1,2],"parent":null},
-			{"pk":"2","name":"group2","members":[3],"parent":null}
+			{"pk":"uuid-1","name":"group1","users":[1,2],"parent":null},
+			{"pk":"uuid-2","name":"group2","users":[3],"parent":null}
 		]
 	}`
 

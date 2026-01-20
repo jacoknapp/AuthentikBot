@@ -49,7 +49,8 @@ type InviteResponse struct {
 }
 
 type User struct {
-	Pk       int64  `json:"pk"`
+	Pk       string `json:"pk"`
+	NumPk    int64  `json:"num_pk"`
 	Username string `json:"username"`
 	Email    string `json:"email"`
 	Name     string `json:"name"`
@@ -64,7 +65,7 @@ type UsersResponse struct {
 type Group struct {
 	Pk       string   `json:"pk"`
 	Name     string   `json:"name"`
-	Members  []int64  `json:"members"`
+	Members  []int64  `json:"users"`
 	ParentPk *string  `json:"parent"`
 }
 
@@ -726,13 +727,13 @@ func addUserToGroup(username, groupName string) (string, error) {
 
 	// Check if user is already in group
 	for _, memberID := range group.Members {
-		if memberID == user.Pk {
+		if memberID == user.NumPk {
 			return "", fmt.Errorf("user '%s' is already in group '%s'", username, groupName)
 		}
 	}
 
 	// Add user to group
-	group.Members = append(group.Members, user.Pk)
+	group.Members = append(group.Members, user.NumPk)
 
 	body, err := json.Marshal(group)
 	if err != nil {
@@ -782,7 +783,7 @@ func removeUserFromGroup(username, groupName string) (string, error) {
 	found := false
 	newMembers := make([]int64, 0)
 	for _, memberID := range group.Members {
-		if memberID == user.Pk {
+		if memberID == user.NumPk {
 			found = true
 		} else {
 			newMembers = append(newMembers, memberID)
