@@ -1,5 +1,5 @@
 # Build stage
-# Pinned to latest stable as of 2026-01-08: go1.25.6
+# Platform: GitHub Actions builds; pinned to Go 1.25 (latest as of 2026-01-20) to match go.mod
 FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
@@ -20,12 +20,16 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o authentik-bot .
 
 # Runtime stage
-FROM alpine:latest
+FROM alpine:3.20
 
-WORKDIR /root/
+RUN adduser -D -g "" appuser
+
+WORKDIR /home/appuser
 
 # Copy binary from builder
 COPY --from=builder /app/authentik-bot .
+
+USER appuser
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
