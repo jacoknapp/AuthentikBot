@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  authentik-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: authentik-bot
+    restart: unless-stopped
+    environment:
+      # Discord Bot Configuration
+      DISCORD_TOKEN: ${DISCORD_TOKEN}
+      
+      # Authentik Configuration
+      AUTHENTIK_URL: ${AUTHENTIK_URL}
+      AUTHENTIK_TOKEN: ${AUTHENTIK_TOKEN}
+      AUTHENTIK_FLOW_SLUG: ${AUTHENTIK_FLOW_SLUG}
+      
+      # Optional: Default invite expiration in hours (default: 24)
+      INVITE_EXPIRATION_HOURS: ${INVITE_EXPIRATION_HOURS:-24}
+    
+    networks:
+      - authentik-bot-network
+
+networks:
+  authentik-bot-network:
+    driver: bridge
