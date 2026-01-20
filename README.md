@@ -29,7 +29,18 @@ A Discord bot written in Go that generates secure, time-limited invitation links
 2. Enter a name: `Authentik Invite Bot` (or your preferred name)
 3. Click **Create**
 
-#### Step 2: Configure Bot as Private
+#### Step 2: Disable Install Link (Private Mode)
+
+> For a truly private bot, disable the automatic install link in Discord.
+
+1. Navigate to **Installation** tab (left sidebar)
+2. Go to **Install Link** section
+3. Select **None** ✓
+   - This disables the "Add App" button on your bot's profile
+   - Users won't see an automatic invite link
+   - You must manually share the OAuth2 URL from Step 3
+
+#### Step 2b: Configure Bot as Private
 
 > ⚠️ **Important:** Keep `bot_public` disabled to ensure only you (the owner) can add this bot to servers.
 
@@ -41,17 +52,6 @@ A Discord bot written in Go that generates secure, time-limited invitation links
 4. Ensure **REQUIRES OAUTH2 CODE GRANT** is **UNCHECKED** ✓
    - This allows simple bot authorization without complex OAuth2 flow
    - Only enable this if you need to request additional user scopes
-
-#### Step 2b: Disable Install Link (Private Mode)
-
-> For a truly private bot, disable the automatic install link in Discord.
-
-1. Navigate to **Installation** tab (left sidebar)
-2. Go to **Install Link** section
-3. Select **None** ✓
-   - This disables the "Add App" button on your bot's profile
-   - Users won't see an automatic invite link
-   - You must manually share the OAuth2 URL from Step 3
 
 > 💡 **Note:** With `bot_public` disabled and install link disabled, you have complete control. Only you (the owner) can add the bot to servers by using the OAuth2 URL you generate.
 
