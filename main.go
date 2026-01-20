@@ -382,6 +382,74 @@ func handleGroupCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 	}
 
+	// Handle list action
+	if action == "list" {
+		groups, err := getAllGroups()
+		if err != nil {
+			log.Printf("Error fetching groups: %v", err)
+			m, _ := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+				Content: stringPtr("❌ Failed to fetch groups: " + err.Error()),
+			})
+			if m != nil {
+				go deleteMessageAfterDelay(s, i.ChannelID, m.ID, 5*time.Minute)
+			}
+			return
+		}
+
+		// Sort by name
+		sort.Slice(groups, func(i, j int) bool {
+			return strings.ToLower(groups[i].Name) < strings.ToLower(groups[j].Name)
+		})
+
+		if len(groups) == 0 {
+			m, _ := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+				Content: stringPtr("No groups to display."),
+			})
+			if m != nil {
+				go deleteMessageAfterDelay(s, i.ChannelID, m.ID, 5*time.Minute)
+			}
+			return
+		}
+
+		pages := buildGroupTablePages(groups)
+		// Edit first page
+		m, _ := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+			Content: &pages[0],
+		})
+
+		if m == nil || len(pages) == 1 {
+			if m != nil {
+				go deleteMessageAfterDelay(s, i.ChannelID, m.ID, 5*time.Minute)
+			}
+			return
+		}
+
+		// Create pagination buttons
+		components := []discordgo.MessageComponent{
+			discordgo.ActionsRow{
+				Components: []discordgo.MessageComponent{
+					discordgo.Button{
+						Label:    "Previous",
+						Style:    discordgo.PrimaryButton,
+						CustomID: "group_list_prev_1",
+						Disabled: true,
+					},
+					discordgo.Button{
+						Label:    "Next",
+						Style:    discordgo.PrimaryButton,
+						CustomID: "group_list_next_1",
+					},
+				},
+			},
+		}
+
+		s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+			Components: &components,
+		})
+		go deleteMessageAfterDelay(s, i.ChannelID, m.ID, 5*time.Minute)
+		return
+	}
+
 	// Check if user is immutable
 	for _, immutable := range config.ImmutableUsernames {
 		if strings.EqualFold(username, immutable) {
@@ -629,6 +697,92 @@ func removeUserFromGroup(username, groupName string) (string, error) {
 	}
 
 	return fmt.Sprintf("User '%s' removed from group '%s'", username, groupName), nil
+}
+
+func getAllGroups() ([]Group, error) {
+	all := []Group{}
+	base := strings.TrimRight(config.AuthentikURL, "/")
+	url := fmt.Sprintf("%s/api/v3/core/groups/?page_size=200", base)
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+config.AuthentikToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("authentik API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var gr GroupsResponse
+	if err := json.Unmarshal(body, &gr); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	all = append(all, gr.Results...)
+
+	return all, nil
+}
+
+// Build paginated table pages for groups within Discord 2000-char limits
+func buildGroupTablePages(groups []Group) []string {
+	// Compute column widths with caps
+	maxName := 0
+	for _, g := range groups {
+		if l := len(g.Name); l > maxName {
+			maxName = l
+		}
+	}
+	if maxName > 44 {
+		maxName = 44
+	}
+	if maxName < 8 {
+		maxName = 8
+	}
+
+	// Pre-build header and separator
+	header := fmt.Sprintf("| %-3s | %-*s | %s |\n", "#", maxName, "group name", "members")
+	sep := "|-----+" + strings.Repeat("-", maxName+2) + "+---------|\n"
+
+	// Build pages by char limit
+	pages := []string{}
+	pageIdx := 1
+	total := len(groups)
+	i := 0
+	for i < total {
+		// Page header line (outside the code block)
+		pageHeader := fmt.Sprintf("Groups (%d total) — Page %d", total, pageIdx)
+		body := header + sep
+		count := 0
+		for i < total {
+			rn := i + 1
+			g := ellipsize(groups[i].Name, maxName)
+			memberCount := len(groups[i].Members)
+			line := fmt.Sprintf("| %3d | %-*s | %7d |\n", rn, maxName, g, memberCount)
+			// Reserve for code block fences and page header
+			if len(pageHeader)+len("```\n")+len(body)+len(line)+len("```") > 1900 {
+				break
+			}
+			body += line
+			i++
+			count++
+			// Safety: hard cap rows per page to avoid edge cases
+			if count >= 40 {
+				break
+			}
+		}
+		pageContent := fmt.Sprintf("%s\n```\n%s```", pageHeader, body)
+		pages = append(pages, pageContent)
+		pageIdx++
+	}
+	return pages
 }
 
 // --- Users listing command ---
