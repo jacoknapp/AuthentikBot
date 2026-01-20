@@ -49,7 +49,7 @@ type InviteResponse struct {
 }
 
 type User struct {
-	Pk       string `json:"pk"`
+	Pk       int64  `json:"pk"`
 	Username string `json:"username"`
 	Email    string `json:"email"`
 	Name     string `json:"name"`
@@ -64,7 +64,7 @@ type UsersResponse struct {
 type Group struct {
 	Pk       string   `json:"pk"`
 	Name     string   `json:"name"`
-	Members  []string `json:"members"`
+	Members  []int64  `json:"members"`
 	ParentPk *string  `json:"parent"`
 }
 
@@ -780,7 +780,7 @@ func removeUserFromGroup(username, groupName string) (string, error) {
 
 	// Check if user is in group and remove
 	found := false
-	newMembers := make([]string, 0)
+	newMembers := make([]int64, 0)
 	for _, memberID := range group.Members {
 		if memberID == user.Pk {
 			found = true
