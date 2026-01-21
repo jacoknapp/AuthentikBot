@@ -388,8 +388,8 @@ func handleInviteCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		return
 	}
 
-	// Send the invite link in a code block
-	message := fmt.Sprintf("✅ Invite generated (expires in %d hours):\n```\n%s\n```", expiration, inviteLink)
+	// Send the invite link as a hyperlink
+	message := fmt.Sprintf("✅ Invite generated (expires in %d hours):\n[%s](%s)", expiration, inviteLink, inviteLink)
 
 	resp, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
 		Content: stringPtr(message),
