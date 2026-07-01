@@ -25,27 +25,28 @@ type Config struct {
 	AuthentikURL       string
 	AuthentikToken     string
 	AuthentikFlowSlug  string
-	DefaultExpiration  int64    // in hours
-	ImmutableUsernames []string // users that cannot be added/removed from groups
-	CommandChannelID   string   // optional: restrict commands to specific channel
+	DefaultExpiration  int64
+	ImmutableUsernames []string
+	CommandChannelID   string
+	RequiredRoleID     string // optional: restrict commands to members with this Discord role ID
 }
 
 type InviteRequest struct {
-	Name      string                 `json:"name"`                 // Invitation name/slug
-	Expires   string                 `json:"expires"`              // ISO 8601 datetime string
-	SingleUse bool                   `json:"single_use"`           // Single-use invitation
-	FixedData map[string]interface{} `json:"fixed_data,omitempty"` // Optional pre-fill data
+	Name      string                 `json:"name"`
+	Expires   string                 `json:"expires"`
+	SingleUse bool                   `json:"single_use"`
+	FixedData map[string]interface{} `json:"fixed_data,omitempty"`
 }
 
 type InviteResponse struct {
-	Pk        string `json:"pk"`         // UUID of the invitation (the itoken parameter)
-	Name      string `json:"name"`       // Invitation name
-	Expires   string `json:"expires"`    // Expiration datetime
-	SingleUse bool   `json:"single_use"` // Whether single-use
+	Pk        string `json:"pk"`
+	Name      string `json:"name"`
+	Expires   string `json:"expires"`
+	SingleUse bool   `json:"single_use"`
 	CreatedBy struct {
 		Pk       int64  `json:"pk"`
 		Username string `json:"username"`
-	} `json:"created_by"` // User who created this invitation
+	} `json:"created_by"`
 }
 
 type User struct {
@@ -70,19 +71,21 @@ type Group struct {
 
 type GroupsResponse struct {
 	Results []Group `json:"results"`
+	Next    string  `json:"next"`
 	Error   string  `json:"error"`
 }
 
 var config Config
+var apiClient = &http.Client{Timeout: 10 * time.Second}
 
 func init() {
 	config.DiscordToken = os.Getenv("DISCORD_TOKEN")
 	config.AuthentikURL = os.Getenv("AUTHENTIK_URL")
 	config.AuthentikToken = os.Getenv("AUTHENTIK_TOKEN")
 	config.AuthentikFlowSlug = os.Getenv("AUTHENTIK_FLOW_SLUG")
-	config.CommandChannelID = os.Getenv("COMMAND_CHANNEL_ID") // optional
+	config.CommandChannelID = os.Getenv("COMMAND_CHANNEL_ID")
+	config.RequiredRoleID = os.Getenv("REQUIRED_ROLE_ID")
 
-	// Parse immutable usernames (comma-separated)
 	immutableStr := os.Getenv("IMMUTABLE_USERNAMES")
 	if immutableStr != "" {
 		config.ImmutableUsernames = strings.Split(immutableStr, ",")
@@ -129,12 +132,6 @@ func main() {
 	if err != nil {
 		log.Fatal("Error opening Discord session:", err)
 	}
-
-	// Register/update slash commands on startup
-	log.Println("🔄 Syncing slash commands...")
-	time.Sleep(2 * time.Second) // Wait for Discord to fully ready
-	registerCommands(dg)
-
 	defer dg.Close()
 
 	log.Println("Bot is running. Press CTRL-C to exit.")
@@ -145,6 +142,8 @@ func main() {
 
 func ready(s *discordgo.Session, event *discordgo.Ready) {
 	log.Printf("Logged in as: %v#%v", event.User.Username, event.User.Discriminator)
+	log.Println("🔄 Syncing slash commands...")
+	registerCommands(s)
 }
 
 func registerCommands(s *discordgo.Session) {
@@ -171,18 +170,9 @@ func registerCommands(s *discordgo.Session) {
 					Description: "Action to perform",
 					Required:    true,
 					Choices: []*discordgo.ApplicationCommandOptionChoice{
-						{
-							Name:  "list",
-							Value: "list",
-						},
-						{
-							Name:  "add",
-							Value: "add",
-						},
-						{
-							Name:  "remove",
-							Value: "remove",
-						},
+						{Name: "list", Value: "list"},
+						{Name: "add", Value: "add"},
+						{Name: "remove", Value: "remove"},
 					},
 				},
 				{
@@ -218,7 +208,6 @@ func registerCommands(s *discordgo.Session) {
 		},
 	}
 
-	// Use BulkOverwrite to ensure all commands are synced (removes old commands too)
 	registeredCommands, err := s.ApplicationCommandBulkOverwrite(s.State.User.ID, "", commands)
 	if err != nil {
 		log.Printf("❌ Error registering commands: %v", err)
@@ -231,8 +220,26 @@ func registerCommands(s *discordgo.Session) {
 	}
 }
 
+func isCommandAllowed(channelID string) bool {
+	if config.CommandChannelID == "" {
+		return true
+	}
+	return channelID == config.CommandChannelID
+}
+
+func isUserAuthorized(member *discordgo.Member) bool {
+	if config.RequiredRoleID == "" {
+		return true
+	}
+	for _, roleID := range member.Roles {
+		if roleID == config.RequiredRoleID {
+			return true
+		}
+	}
+	return false
+}
+
 func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// Handle autocomplete interactions
 	if i.Type == discordgo.InteractionApplicationCommandAutocomplete {
 		handleAutocomplete(s, i)
 		return
@@ -242,7 +249,6 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		return
 	}
 
-	// Check if command is allowed in this channel
 	if !isCommandAllowed(i.ChannelID) {
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -254,11 +260,23 @@ func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		return
 	}
 
-	if i.ApplicationCommandData().Name == "invite" {
+	if i.Member != nil && !isUserAuthorized(i.Member) {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "❌ You do not have permission to use this command.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	switch i.ApplicationCommandData().Name {
+	case "invite":
 		handleInviteCommand(s, i)
-	} else if i.ApplicationCommandData().Name == "group" {
+	case "group":
 		handleGroupCommand(s, i)
-	} else if i.ApplicationCommandData().Name == "user" {
+	case "user":
 		handleUserCommand(s, i)
 	}
 }
@@ -270,10 +288,20 @@ func handleAutocomplete(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		return
 	}
 
+	// Return empty choices to unauthorized members to prevent user/group enumeration
+	if i.Member != nil && !isUserAuthorized(i.Member) {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionApplicationCommandAutocompleteResult,
+			Data: &discordgo.InteractionResponseData{
+				Choices: []*discordgo.ApplicationCommandOptionChoice{},
+			},
+		})
+		return
+	}
+
 	var focusedOption string
 	var currentInput string
 
-	// Find which option is focused
 	for _, opt := range data.Options {
 		if opt.Focused {
 			focusedOption = opt.Name
@@ -286,20 +314,17 @@ func handleAutocomplete(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 	switch focusedOption {
 	case "group":
-		// Fetch groups from Authentik
 		groups, err := getAllGroups()
 		if err != nil {
 			log.Printf("Autocomplete error fetching groups: %v", err)
 			choices = []*discordgo.ApplicationCommandOptionChoice{}
 		} else {
-			// Filter and sort groups by input
 			for _, g := range groups {
 				if currentInput == "" || strings.Contains(strings.ToLower(g.Name), currentInput) {
 					choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
 						Name:  g.Name,
 						Value: g.Name,
 					})
-					// Discord limits autocomplete to 25 choices
 					if len(choices) >= 25 {
 						break
 					}
@@ -308,19 +333,16 @@ func handleAutocomplete(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 
 	case "username":
-		// Fetch users from Authentik
 		users, err := getAllUsers()
 		if err != nil {
 			log.Printf("Autocomplete error fetching users: %v", err)
 			choices = []*discordgo.ApplicationCommandOptionChoice{}
 		} else {
-			// Filter out immutable users
 			immutable := map[string]bool{}
 			for _, u := range config.ImmutableUsernames {
 				immutable[strings.ToLower(strings.TrimSpace(u))] = true
 			}
 
-			// Filter and sort users by input
 			for _, u := range users {
 				if immutable[strings.ToLower(u.Username)] {
 					continue
@@ -330,7 +352,6 @@ func handleAutocomplete(s *discordgo.Session, i *discordgo.InteractionCreate) {
 						Name:  u.Username,
 						Value: u.Username,
 					})
-					// Discord limits autocomplete to 25 choices
 					if len(choices) >= 25 {
 						break
 					}
@@ -339,86 +360,64 @@ func handleAutocomplete(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 	}
 
-	// Respond with the choices
-	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionApplicationCommandAutocompleteResult,
 		Data: &discordgo.InteractionResponseData{
 			Choices: choices,
 		},
-	})
-	if err != nil {
+	}); err != nil {
 		log.Printf("Error responding to autocomplete: %v", err)
 	}
 }
 
-func isCommandAllowed(channelID string) bool {
-	// If no channel restriction is set, allow all channels
-	if config.CommandChannelID == "" {
-		return true
-	}
-	// Only allow if the command is in the configured channel
-	return channelID == config.CommandChannelID
-}
-
 func handleInviteCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// Defer the response
+	// Ephemeral: only the invoker sees the invite link
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Flags: discordgo.MessageFlagsEphemeral,
+		},
 	})
 
 	expiration := config.DefaultExpiration
-	if len(i.ApplicationCommandData().Options) > 0 {
-		for _, opt := range i.ApplicationCommandData().Options {
-			if opt.Name == "expiration" {
-				expiration = opt.IntValue()
-				break
-			}
+	for _, opt := range i.ApplicationCommandData().Options {
+		if opt.Name == "expiration" {
+			expiration = opt.IntValue()
+			break
 		}
+	}
+	if expiration < 1 {
+		expiration = 1
+	}
+	if expiration > 8760 {
+		expiration = 8760
 	}
 
 	inviteLink, err := generateAuthentikInvite(expiration)
 	if err != nil {
 		log.Printf("Error generating invite: %v", err)
-		msg, _ := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+		s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
 			Content: stringPtr("❌ Failed to generate invite: " + err.Error()),
 		})
-		if msg != nil {
-			go deleteMessageAfterDelay(s, i.ChannelID, msg.ID, 5*time.Minute)
-		}
 		return
 	}
 
-	// Send the invite link in a code block
 	message := fmt.Sprintf("✅ Invite generated (expires in %d hours):\n```\n%s\n```", expiration, inviteLink)
-
-	resp, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+	s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
 		Content: stringPtr(message),
 	})
-
-	if err != nil {
-		log.Printf("Error sending response: %v", err)
-		return
-	}
-
-	// Schedule deletion of the message after 5 minutes
-	go deleteMessageAfterDelay(s, i.ChannelID, resp.ID, 5*time.Minute)
 }
 
 func generateAuthentikInvite(expirationHours int64) (string, error) {
-	// Create invitation via Authentik API using the stages/invitation/invitations endpoint
-	// Users access the invite via: https://auth.example.com/if/flow/{flow_slug}/?itoken={invitation_uuid}
-
-	// Calculate expiration datetime (ISO 8601 format)
 	expiresAt := time.Now().Add(time.Duration(expirationHours) * time.Hour)
 	expiresStr := expiresAt.Format("2006-01-02T15:04:05Z")
 
-	// Generate random name for the invitation (must be slug format)
 	inviteName := "invite-" + strings.ReplaceAll(uuid.New().String(), "-", "")[:12]
 
 	inviteReq := InviteRequest{
 		Name:      inviteName,
 		Expires:   expiresStr,
-		SingleUse: true, // All invites are single-use
+		SingleUse: true,
 		FixedData: map[string]interface{}{},
 	}
 
@@ -427,7 +426,6 @@ func generateAuthentikInvite(expirationHours int64) (string, error) {
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	// POST to correct Authentik invitations endpoint
 	url := fmt.Sprintf("%s/api/v3/stages/invitation/invitations/", strings.TrimRight(config.AuthentikURL, "/"))
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
 	if err != nil {
@@ -437,8 +435,7 @@ func generateAuthentikInvite(expirationHours int64) (string, error) {
 	req.Header.Set("Authorization", "Bearer "+config.AuthentikToken)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := apiClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to send request to Authentik: %w", err)
 	}
@@ -449,30 +446,26 @@ func generateAuthentikInvite(expirationHours int64) (string, error) {
 		return "", fmt.Errorf("failed to read response: %w", err)
 	}
 
-	// Expected status is 201 Created
 	if resp.StatusCode != http.StatusCreated {
 		log.Printf("Authentik API returned status %d: %s", resp.StatusCode, string(respBody))
 		return "", fmt.Errorf("authentik API returned status %d", resp.StatusCode)
 	}
 
 	var inviteResp InviteResponse
-	err = json.Unmarshal(respBody, &inviteResp)
-	if err != nil {
+	if err := json.Unmarshal(respBody, &inviteResp); err != nil {
 		log.Printf("Failed to parse response JSON: %s", string(respBody))
 		return "", fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	// Construct invitation URL from response
-	// Format: https://authentik.example.com/if/flow/{flow-slug}/?itoken={invitation-uuid}
 	if inviteResp.Pk == "" {
-		log.Printf("Error: API response missing 'pk' (invitation UUID) field")
+		log.Printf("Error: API response missing 'pk' field")
 		return "", fmt.Errorf("authentik response missing invitation pk")
 	}
 
 	baseURL := strings.TrimRight(config.AuthentikURL, "/")
 	inviteLink := fmt.Sprintf("%s/if/flow/%s/?itoken=%s", baseURL, config.AuthentikFlowSlug, inviteResp.Pk)
 
-	log.Printf("Successfully created invitation with UUID: %s (expires: %s)", inviteResp.Pk, inviteResp.Expires)
+	log.Printf("Created invitation UUID: %s (expires: %s)", inviteResp.Pk, inviteResp.Expires)
 	return inviteLink, nil
 }
 
@@ -480,18 +473,13 @@ func stringPtr(s string) *string {
 	return &s
 }
 
-func ptrInt64(i int64) *int64 {
-	return &i
-}
-
 func deleteMessageAfterDelay(s *discordgo.Session, channelID, messageID string, delay time.Duration) {
 	time.Sleep(delay)
-	err := s.ChannelMessageDelete(channelID, messageID)
-	if err != nil {
+	if err := s.ChannelMessageDelete(channelID, messageID); err != nil {
 		log.Printf("Error deleting message: %v", err)
 		return
 	}
-	log.Printf("Invite message deleted after 5 minutes (message ID: %s)", messageID)
+	log.Printf("Message deleted after delay (ID: %s)", messageID)
 }
 
 func validateGroupActionInputs(action, groupName, username string) error {
@@ -532,7 +520,6 @@ func handleGroupCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 	}
 
-	// Handle list action
 	if action == "list" {
 		groups, err := getAllGroups()
 		if err != nil {
@@ -546,9 +533,8 @@ func handleGroupCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			return
 		}
 
-		// Sort by name
-		sort.Slice(groups, func(i, j int) bool {
-			return strings.ToLower(groups[i].Name) < strings.ToLower(groups[j].Name)
+		sort.Slice(groups, func(a, b int) bool {
+			return strings.ToLower(groups[a].Name) < strings.ToLower(groups[b].Name)
 		})
 
 		if len(groups) == 0 {
@@ -562,41 +548,16 @@ func handleGroupCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 
 		pages := buildGroupTablePages(groups)
-		// Edit first page
-		m, _ := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-			Content: &pages[0],
-		})
-
-		if m == nil || len(pages) == 1 {
-			if m != nil {
-				go deleteMessageAfterDelay(s, i.ChannelID, m.ID, 5*time.Minute)
+		firstMsg, _ := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: stringPtr(pages[0])})
+		if firstMsg != nil {
+			go deleteMessageAfterDelay(s, i.ChannelID, firstMsg.ID, 5*time.Minute)
+		}
+		for p := 1; p < len(pages); p++ {
+			fm, _ := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{Content: pages[p]})
+			if fm != nil {
+				go deleteMessageAfterDelay(s, fm.ChannelID, fm.ID, 5*time.Minute)
 			}
-			return
 		}
-
-		// Create pagination buttons
-		components := []discordgo.MessageComponent{
-			discordgo.ActionsRow{
-				Components: []discordgo.MessageComponent{
-					discordgo.Button{
-						Label:    "Previous",
-						Style:    discordgo.PrimaryButton,
-						CustomID: "group_list_prev_1",
-						Disabled: true,
-					},
-					discordgo.Button{
-						Label:    "Next",
-						Style:    discordgo.PrimaryButton,
-						CustomID: "group_list_next_1",
-					},
-				},
-			},
-		}
-
-		s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-			Components: &components,
-		})
-		go deleteMessageAfterDelay(s, i.ChannelID, m.ID, 5*time.Minute)
 		return
 	}
 
@@ -610,7 +571,6 @@ func handleGroupCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		return
 	}
 
-	// Check if user is immutable
 	for _, immutable := range config.ImmutableUsernames {
 		if strings.EqualFold(username, immutable) {
 			m, _ := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
@@ -626,11 +586,12 @@ func handleGroupCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	var result string
 	var err error
 
-	if action == "add" {
+	switch action {
+	case "add":
 		result, err = addUserToGroup(username, groupName)
-	} else if action == "remove" {
+	case "remove":
 		result, err = removeUserFromGroup(username, groupName)
-	} else {
+	default:
 		m, _ := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
 			Content: stringPtr("❌ Invalid action: " + action),
 		})
@@ -651,9 +612,8 @@ func handleGroupCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		return
 	}
 
-	message := fmt.Sprintf("✅ %s", result)
 	m, _ := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-		Content: stringPtr(message),
+		Content: stringPtr("✅ " + result),
 	})
 	if m != nil {
 		go deleteMessageAfterDelay(s, i.ChannelID, m.ID, 5*time.Minute)
@@ -669,12 +629,10 @@ func getUser(username string) (*User, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-
 	req.Header.Set("Authorization", "Bearer "+config.AuthentikToken)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := apiClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
@@ -690,8 +648,7 @@ func getUser(username string) (*User, error) {
 	}
 
 	var usersResp UsersResponse
-	err = json.Unmarshal(respBody, &usersResp)
-	if err != nil {
+	if err := json.Unmarshal(respBody, &usersResp); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
@@ -711,12 +668,10 @@ func getGroup(groupName string) (*Group, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-
 	req.Header.Set("Authorization", "Bearer "+config.AuthentikToken)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := apiClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
@@ -732,8 +687,7 @@ func getGroup(groupName string) (*Group, error) {
 	}
 
 	var groupsResp GroupsResponse
-	err = json.Unmarshal(respBody, &groupsResp)
-	if err != nil {
+	if err := json.Unmarshal(respBody, &groupsResp); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
@@ -749,49 +703,32 @@ func addUserToGroup(username, groupName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
 	group, err := getGroup(groupName)
 	if err != nil {
 		return "", err
 	}
 
-	// Check if user is already in group
-	for _, memberID := range group.Members {
-		if memberID == user.Pk {
-			return "", fmt.Errorf("user '%s' is already in group '%s'", username, groupName)
-		}
-	}
-
-	// Add user to group
-	group.Members = append(group.Members, user.Pk)
-
-	body, err := json.Marshal(group)
+	body, err := json.Marshal(map[string]int64{"pk": user.Pk})
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/api/v3/core/groups/%s/", strings.TrimRight(config.AuthentikURL, "/"), group.Pk)
-	req, err := http.NewRequest("PATCH", url, bytes.NewBuffer(body))
+	url := fmt.Sprintf("%s/api/v3/core/groups/%s/add_user/", strings.TrimRight(config.AuthentikURL, "/"), group.Pk)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
-
 	req.Header.Set("Authorization", "Bearer "+config.AuthentikToken)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := apiClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("authentik API returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -803,56 +740,32 @@ func removeUserFromGroup(username, groupName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
 	group, err := getGroup(groupName)
 	if err != nil {
 		return "", err
 	}
 
-	// Check if user is in group and remove
-	found := false
-	newMembers := make([]int64, 0)
-	for _, memberID := range group.Members {
-		if memberID == user.Pk {
-			found = true
-		} else {
-			newMembers = append(newMembers, memberID)
-		}
-	}
-
-	if !found {
-		return "", fmt.Errorf("user '%s' is not in group '%s'", username, groupName)
-	}
-
-	group.Members = newMembers
-
-	body, err := json.Marshal(group)
+	body, err := json.Marshal(map[string]int64{"pk": user.Pk})
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/api/v3/core/groups/%s/", strings.TrimRight(config.AuthentikURL, "/"), group.Pk)
-	req, err := http.NewRequest("PATCH", url, bytes.NewBuffer(body))
+	url := fmt.Sprintf("%s/api/v3/core/groups/%s/remove_user/", strings.TrimRight(config.AuthentikURL, "/"), group.Pk)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
-
 	req.Header.Set("Authorization", "Bearer "+config.AuthentikToken)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := apiClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("authentik API returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -864,36 +777,42 @@ func getAllGroups() ([]Group, error) {
 	base := strings.TrimRight(config.AuthentikURL, "/")
 	url := fmt.Sprintf("%s/api/v3/core/groups/?page_size=200", base)
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+config.AuthentikToken)
-	req.Header.Set("Content-Type", "application/json")
+	for {
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+config.AuthentikToken)
+		req.Header.Set("Content-Type", "application/json")
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("authentik API returned status %d: %s", resp.StatusCode, string(body))
-	}
+		resp, err := apiClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to send request: %w", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
 
-	var gr GroupsResponse
-	if err := json.Unmarshal(body, &gr); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("authentik API returned status %d: %s", resp.StatusCode, string(body))
+		}
+
+		var gr GroupsResponse
+		if err := json.Unmarshal(body, &gr); err != nil {
+			return nil, fmt.Errorf("failed to parse response: %w", err)
+		}
+		all = append(all, gr.Results...)
+
+		if strings.TrimSpace(gr.Next) == "" {
+			break
+		}
+		url = gr.Next
 	}
-	all = append(all, gr.Results...)
 
 	return all, nil
 }
 
 // Build paginated table pages for groups within Discord 2000-char limits
 func buildGroupTablePages(groups []Group) []string {
-	// Compute column widths with caps
 	maxName := 0
 	for _, g := range groups {
 		if l := len(g.Name); l > maxName {
@@ -907,17 +826,14 @@ func buildGroupTablePages(groups []Group) []string {
 		maxName = 8
 	}
 
-	// Pre-build header and separator
 	header := fmt.Sprintf("| %-3s | %-*s | %s |\n", "#", maxName, "group name", "members")
 	sep := "|-----+" + strings.Repeat("-", maxName+2) + "+---------|\n"
 
-	// Build pages by char limit
 	pages := []string{}
 	pageIdx := 1
 	total := len(groups)
 	i := 0
 	for i < total {
-		// Page header line (outside the code block)
 		pageHeader := fmt.Sprintf("Groups (%d total) — Page %d", total, pageIdx)
 		body := header + sep
 		count := 0
@@ -926,14 +842,12 @@ func buildGroupTablePages(groups []Group) []string {
 			g := ellipsize(groups[i].Name, maxName)
 			memberCount := len(groups[i].Members)
 			line := fmt.Sprintf("| %3d | %-*s | %7d |\n", rn, maxName, g, memberCount)
-			// Reserve for code block fences and page header
 			if len(pageHeader)+len("```\n")+len(body)+len(line)+len("```") > 1900 {
 				break
 			}
 			body += line
 			i++
 			count++
-			// Safety: hard cap rows per page to avoid edge cases
 			if count >= 40 {
 				break
 			}
@@ -945,7 +859,6 @@ func buildGroupTablePages(groups []Group) []string {
 	return pages
 }
 
-// --- Users listing command ---
 func handleUserCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
@@ -981,7 +894,6 @@ func handleUserCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		return
 	}
 
-	// Filter out immutable usernames
 	immutable := map[string]bool{}
 	for _, u := range config.ImmutableUsernames {
 		immutable[strings.ToLower(strings.TrimSpace(u))] = true
@@ -995,7 +907,6 @@ func handleUserCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		filtered = append(filtered, u)
 	}
 
-	// Sort by username
 	sort.Slice(filtered, func(i, j int) bool {
 		return strings.ToLower(filtered[i].Username) < strings.ToLower(filtered[j].Username)
 	})
@@ -1011,12 +922,10 @@ func handleUserCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 
 	pages := buildUserTablePages(filtered)
-	// Edit first page
 	firstMsg, _ := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: stringPtr(pages[0])})
 	if firstMsg != nil {
 		go deleteMessageAfterDelay(s, i.ChannelID, firstMsg.ID, 5*time.Minute)
 	}
-	// Followups for remaining pages
 	for p := 1; p < len(pages); p++ {
 		fm, _ := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{Content: pages[p]})
 		if fm != nil {
@@ -1030,7 +939,6 @@ func getAllUsers() ([]User, error) {
 	base := strings.TrimRight(config.AuthentikURL, "/")
 	url := fmt.Sprintf("%s/api/v3/core/users/?page_size=200", base)
 
-	client := &http.Client{Timeout: 15 * time.Second}
 	for {
 		req, err := http.NewRequest("GET", url, nil)
 		if err != nil {
@@ -1039,12 +947,13 @@ func getAllUsers() ([]User, error) {
 		req.Header.Set("Authorization", "Bearer "+config.AuthentikToken)
 		req.Header.Set("Content-Type", "application/json")
 
-		resp, err := client.Do(req)
+		resp, err := apiClient.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("failed to send request: %w", err)
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("authentik API returned status %d: %s", resp.StatusCode, string(body))
 		}
@@ -1065,7 +974,6 @@ func getAllUsers() ([]User, error) {
 
 // Build paginated table pages within Discord 2000-char limits
 func buildUserTablePages(users []User) []string {
-	// Determine display name for each user (prefer Name, fallback to Email)
 	type row struct{ Username, FullName string }
 	rows := make([]row, 0, len(users))
 	for _, u := range users {
@@ -1076,7 +984,6 @@ func buildUserTablePages(users []User) []string {
 		rows = append(rows, row{Username: u.Username, FullName: name})
 	}
 
-	// Compute column widths with caps
 	maxUser := 0
 	maxName := 0
 	for _, r := range rows {
@@ -1100,17 +1007,14 @@ func buildUserTablePages(users []User) []string {
 		maxName = 8
 	}
 
-	// Pre-build header and separator
 	header := fmt.Sprintf("| %-3s | %-*s | %-*s |\n", "#", maxUser, "username", maxName, "full name")
 	sep := "|-----+" + strings.Repeat("-", maxUser+2) + "+" + strings.Repeat("-", maxName+2) + "|\n"
 
-	// Build pages by char limit
 	pages := []string{}
 	pageIdx := 1
 	total := len(rows)
 	i := 0
 	for i < total {
-		// Page header line (outside the code block)
 		pageHeader := fmt.Sprintf("Users (%d, excluding immutable) — Page %d", total, pageIdx)
 		body := header + sep
 		count := 0
@@ -1119,14 +1023,12 @@ func buildUserTablePages(users []User) []string {
 			u := ellipsize(rows[i].Username, maxUser)
 			n := ellipsize(rows[i].FullName, maxName)
 			line := fmt.Sprintf("| %3d | %-*s | %-*s |\n", rn, maxUser, u, maxName, n)
-			// Reserve for code block fences and page header
 			if len(pageHeader)+len("```\n")+len(body)+len(line)+len("```") > 1900 {
 				break
 			}
 			body += line
 			i++
 			count++
-			// Safety: hard cap rows per page to avoid edge cases
 			if count >= 40 {
 				break
 			}

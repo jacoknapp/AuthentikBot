@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
 )
 
@@ -33,18 +34,32 @@ func TestRandomSlugGeneration(t *testing.T) {
 }
 
 func TestHelperFunctions(t *testing.T) {
-	// Test stringPtr
 	str := "test"
 	result := stringPtr(str)
 	if result == nil || *result != "test" {
 		t.Error("stringPtr failed")
 	}
+}
 
-	// Test ptrInt64
-	var val int64 = 42
-	result64 := ptrInt64(val)
-	if result64 == nil || *result64 != 42 {
-		t.Error("ptrInt64 failed")
+func TestIsUserAuthorized(t *testing.T) {
+	origRole := config.RequiredRoleID
+	defer func() { config.RequiredRoleID = origRole }()
+
+	member := func(roles ...string) *discordgo.Member {
+		return &discordgo.Member{Roles: roles}
+	}
+
+	config.RequiredRoleID = ""
+	if !isUserAuthorized(member()) {
+		t.Error("empty RequiredRoleID should allow all")
+	}
+
+	config.RequiredRoleID = "111"
+	if isUserAuthorized(member("222", "333")) {
+		t.Error("member without required role should be denied")
+	}
+	if !isUserAuthorized(member("222", "111")) {
+		t.Error("member with required role should be allowed")
 	}
 }
 

@@ -8,7 +8,7 @@ WORKDIR /app
 RUN apk add --no-cache git
 
 # Copy go mod files
-COPY go.mod go.sum* ./
+COPY go.mod go.sum ./
 
 # Download dependencies
 RUN go mod download
@@ -20,7 +20,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o authentik-bot .
 
 # Runtime stage
-FROM alpine:3.20
+FROM alpine:3.21
 
 RUN adduser -D -g "" appuser
 
@@ -33,6 +33,6 @@ USER appuser
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD ps aux | grep authentik-bot | grep -v grep || exit 1
+    CMD pgrep -x authentik-bot || exit 1
 
 CMD ["./authentik-bot"]

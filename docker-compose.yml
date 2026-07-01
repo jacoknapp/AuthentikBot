@@ -23,6 +23,10 @@ services:
       # Optional: Restrict commands to a specific Discord channel ID
       # Leave empty to allow commands in all channels
       COMMAND_CHANNEL_ID: ${COMMAND_CHANNEL_ID:-}
+
+      # Optional: Restrict commands to members with a specific Discord role ID
+      # Leave empty to allow all server members
+      REQUIRED_ROLE_ID: ${REQUIRED_ROLE_ID:-}
     
     networks:
       - authentik-bot-network
