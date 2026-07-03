@@ -32,7 +32,10 @@ COPY --from=builder /app/authentik-bot .
 USER appuser
 
 # Health check
+# NOTE: this image's `pgrep` is busybox (/usr/bin/pgrep -> /bin/busybox) and does
+# not reliably match the process name, which reports false "unhealthy" and lets an
+# autoheal watcher restart-loop the container. Use the proven ps-based check.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD pgrep -x authentik-bot || exit 1
+    CMD ps aux | grep '[a]uthentik-bot' || exit 1
 
 CMD ["./authentik-bot"]

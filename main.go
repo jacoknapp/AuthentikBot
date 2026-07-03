@@ -128,9 +128,25 @@ func main() {
 	dg.AddHandler(ready)
 	dg.AddHandler(interactionCreate)
 
-	err = dg.Open()
-	if err != nil {
-		log.Fatal("Error opening Discord session:", err)
+	// Open the gateway with exponential backoff. Never exit-and-let-Docker-restart
+	// on a failed connect: each restart is a fresh IDENTIFY, and rapid repeated
+	// IDENTIFYs are flagged by Discord as abuse (and get the bot token reset).
+	// Once Open succeeds, discordgo handles reconnects internally via RESUME.
+	backoff := 5 * time.Second
+	const maxBackoff = 15 * time.Minute
+	for {
+		err = dg.Open()
+		if err == nil {
+			break
+		}
+		log.Printf("Error opening Discord session: %v (retrying in %s)", err, backoff)
+		time.Sleep(backoff)
+		if backoff < maxBackoff {
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
 	}
 	defer dg.Close()
 
