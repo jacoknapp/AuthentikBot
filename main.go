@@ -117,6 +117,14 @@ func init() {
 	if config.AuthentikFlowSlug == "" {
 		log.Fatal("Missing required environment variable: AUTHENTIK_FLOW_SLUG")
 	}
+	// Required, not optional: the channel lock is the control that keeps
+	// /invite and /group off every other channel in the guild.
+	if config.CommandChannelID == "" {
+		log.Fatal("Missing required environment variable: COMMAND_CHANNEL_ID")
+	}
+	if config.RequiredRoleID == "" {
+		log.Println("⚠️ REQUIRED_ROLE_ID is not set: every member who can post in the designated channel may run privileged commands")
+	}
 }
 
 func main() {
@@ -236,9 +244,13 @@ func registerCommands(s *discordgo.Session) {
 	}
 }
 
+// isCommandAllowed fails closed: an unset COMMAND_CHANNEL_ID denies every
+// channel rather than allowing all of them, so a config that fails to load
+// locks the bot down instead of opening privileged Authentik commands to the
+// whole guild. Startup already refuses to run without the value set.
 func isCommandAllowed(channelID string) bool {
 	if config.CommandChannelID == "" {
-		return true
+		return false
 	}
 	return channelID == config.CommandChannelID
 }
@@ -256,7 +268,19 @@ func isUserAuthorized(member *discordgo.Member) bool {
 }
 
 func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	// Autocomplete is gated on the channel too: it queries Authentik for group
+	// and user names, so serving it outside the designated channel would leak
+	// that data to any channel the bot can see.
 	if i.Type == discordgo.InteractionApplicationCommandAutocomplete {
+		if !isCommandAllowed(i.ChannelID) {
+			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionApplicationCommandAutocompleteResult,
+				Data: &discordgo.InteractionResponseData{
+					Choices: []*discordgo.ApplicationCommandOptionChoice{},
+				},
+			})
+			return
+		}
 		handleAutocomplete(s, i)
 		return
 	}
