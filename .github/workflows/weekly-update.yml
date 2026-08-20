@@ -39,6 +39,7 @@ jobs:
           AUTHENTIK_URL: https://example.com
           AUTHENTIK_TOKEN: test-token
           AUTHENTIK_FLOW_SLUG: flow
+          COMMAND_CHANNEL_ID: "1234567890123456789"
         run: go test ./...
 
       - name: Set up QEMU

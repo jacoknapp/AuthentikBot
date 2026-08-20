@@ -265,10 +265,12 @@ func TestIsCommandAllowed(t *testing.T) {
 		expectedAllowed bool
 	}{
 		{
-			name:            "No restriction - should allow",
+			// isCommandAllowed fails closed: an unset COMMAND_CHANNEL_ID must
+			// deny rather than open privileged commands to the whole guild.
+			name:            "No restriction - should deny (fail closed)",
 			configChannelID: "",
 			testChannelID:   "123456789",
-			expectedAllowed: true,
+			expectedAllowed: false,
 		},
 		{
 			name:            "Matching channel - should allow",
