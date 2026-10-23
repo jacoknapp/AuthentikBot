@@ -97,6 +97,7 @@ func (r *recoveryService) buildAutocompleteSnapshot(ctx context.Context) ([]reco
 	defer cancel()
 	api := *r.api
 	api.ctx = work
+	api.scanRoles = newRecoveryScanRoles()
 	reader := &recoveryService{cfg: r.cfg, api: &api, audit: r.audit}
 	serviceID, err := api.identity(r.cfg.ServiceUsername, r.cfg.UseExistingToken, r.cfg.ExpectedUserID)
 	if err != nil {

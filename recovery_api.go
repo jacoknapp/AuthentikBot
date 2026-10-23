@@ -42,10 +42,11 @@ func (u recoveryUser) same(v recoveryUser) bool {
 }
 
 type recoveryAPI struct {
-	ctx    context.Context
-	base   *url.URL
-	token  string
-	client *http.Client
+	scanRoles *recoveryScanRoles
+	ctx       context.Context
+	base      *url.URL
+	token     string
+	client    *http.Client
 }
 
 func newRecoveryAPI(base, token string) (*recoveryAPI, error) {

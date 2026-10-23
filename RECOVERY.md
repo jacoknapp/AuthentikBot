@@ -28,7 +28,11 @@ A background scan reuses the full account and effective-permission checks and
 caches only usernames and stable IDs in memory. Its maximum age is **90 seconds,
 measured from the start of the scan**. One refresh runs at a time with at most
 four concurrent checks, a 40-second timeout and a five-second pause after each
-attempt. Failed refreshes clear the snapshot; startup and expired caches return
+attempt. Shared-role permission reads are deduplicated by role UUID and visibility
+mode within that one scan, including single-flight error results. This memo is
+fresh for every scan and exists only on its cloned API client; credential identity,
+user records and effective role membership are not memoized. Preview, confirmation
+and execution use the original uncached client and repeat full grant checks. Failed refreshes clear the snapshot; startup and expired caches return
 no suggestions. API authentication/permission denials stop background refresh
 until restart; they are not retried automatically. Request traffic never triggers
 refresh storms or waits on HTTP.

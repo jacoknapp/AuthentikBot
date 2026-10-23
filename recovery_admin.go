@@ -92,42 +92,11 @@ func (a *recoveryAPI) permissionSnapshot(pk int64, fullVisibility bool) (string,
 	entries := []string{}
 	for _, id := range ids {
 		entries = append(entries, "role:"+id)
-		var global, objects []recoveryPermission
-		for _, object := range []bool{false, true} {
-			path := "/api/v3/rbac/permissions/"
-			q := url.Values{"role": {id}}
-			if object {
-				path = "/api/v3/rbac/permissions/roles/"
-				q = url.Values{"uuid": {id}, "page_size": {"10"}}
-			}
-			perms, e := recoveryList[recoveryPermission](a, path, q)
-			if e != nil {
-				return "", e
-			}
-			if object {
-				objects = perms
-			} else {
-				global = perms
-			}
-			seen := map[int64]bool{}
-			for _, p := range perms {
-				if !p.ordinary(object) || seen[p.ID] {
-					return "", errRecoveryProtected
-				}
-				seen[p.ID] = true
-				b, _ := json.Marshal(p)
-				scope := "global:"
-				if object {
-					scope = "object:"
-				}
-				entries = append(entries, id+":"+scope+string(b))
-			}
-		}
-		assignments, e := a.completeRoleAssignments(id, global, objects, fullVisibility)
+		grants, e := a.rolePermissionEntries(id, fullVisibility)
 		if e != nil {
 			return "", e
 		}
-		entries = append(entries, assignments...)
+		entries = append(entries, grants...)
 	}
 	after, e := a.effectiveRoles(pk)
 	if e != nil {
@@ -141,6 +110,51 @@ func (a *recoveryAPI) permissionSnapshot(pk int64, fullVisibility bool) (string,
 	digest := sha256.Sum256(b)
 	return hex.EncodeToString(digest[:]), nil
 }
+
+// loadRolePermissionEntries performs the existing complete grant validation.
+// Recovery actions always call this uncached; only a cloned suggestion-scan API
+// may deduplicate its result by immutable role UUID and visibility mode.
+func (a *recoveryAPI) loadRolePermissionEntries(id string, fullVisibility bool) ([]string, error) {
+	entries := []string{}
+	var global, objects []recoveryPermission
+	for _, object := range []bool{false, true} {
+		path := "/api/v3/rbac/permissions/"
+		q := url.Values{"role": {id}}
+		if object {
+			path = "/api/v3/rbac/permissions/roles/"
+			q = url.Values{"uuid": {id}, "page_size": {"10"}}
+		}
+		perms, e := recoveryList[recoveryPermission](a, path, q)
+		if e != nil {
+			return nil, e
+		}
+		if object {
+			objects = perms
+		} else {
+			global = perms
+		}
+		seen := map[int64]bool{}
+		for _, p := range perms {
+			if !p.ordinary(object) || seen[p.ID] {
+				return nil, errRecoveryProtected
+			}
+			seen[p.ID] = true
+			b, _ := json.Marshal(p)
+			scope := "global:"
+			if object {
+				scope = "object:"
+			}
+			entries = append(entries, id+":"+scope+string(b))
+		}
+	}
+	assignments, e := a.completeRoleAssignments(id, global, objects, fullVisibility)
+	if e != nil {
+		return nil, e
+	}
+	entries = append(entries, assignments...)
+	return entries, nil
+}
+
 func (a *recoveryAPI) ordinaryPermissions(pk int64, fullVisibility bool) (string, error) {
 	first, err := a.permissionSnapshot(pk, fullVisibility)
 	if err != nil {
