@@ -78,7 +78,7 @@ type GroupsResponse struct {
 var config Config
 var apiClient = &http.Client{Timeout: 10 * time.Second}
 
-func init() {
+func loadConfig() {
 	config.DiscordToken = os.Getenv("DISCORD_TOKEN")
 	config.AuthentikURL = os.Getenv("AUTHENTIK_URL")
 	config.AuthentikToken = os.Getenv("AUTHENTIK_TOKEN")
@@ -128,6 +128,15 @@ func init() {
 }
 
 func main() {
+	loadConfig()
+	var err error
+	recovery, err = newRecoveryFromEnv(config)
+	if err != nil {
+		log.Fatal("Invalid recovery configuration (see RECOVERY.md)")
+	}
+	if recovery != nil {
+		defer recovery.audit.Close()
+	}
 	dg, err := discordgo.New("Bot " + config.DiscordToken)
 	if err != nil {
 		log.Fatal("Error creating Discord session:", err)
@@ -232,6 +241,7 @@ func registerCommands(s *discordgo.Session) {
 		},
 	}
 
+	commands = append(commands, recoveryCommands()...)
 	registeredCommands, err := s.ApplicationCommandBulkOverwrite(s.State.User.ID, "", commands)
 	if err != nil {
 		log.Printf("❌ Error registering commands: %v", err)
@@ -268,6 +278,10 @@ func isUserAuthorized(member *discordgo.Member) bool {
 }
 
 func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if isRecoveryInteraction(i) {
+		handleRecoveryInteraction(s, i)
+		return
+	}
 	// Autocomplete is gated on the channel too: it queries Authentik for group
 	// and user names, so serving it outside the designated channel would leak
 	// that data to any channel the bot can see.

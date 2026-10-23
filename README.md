@@ -166,7 +166,7 @@ A Discord bot written in Go that generates secure, time-limited invitation links
    - `AUTHENTIK_TOKEN` - From Authentik Tokens & App Passwords
    - `AUTHENTIK_FLOW_SLUG` - From Authentik Flows page
    - `INVITE_EXPIRATION_HOURS` - Optional, defaults to 24
-   - `COMMAND_CHANNEL_ID` - Optional, restricts commands to one channel
+   - `COMMAND_CHANNEL_ID` - Required, restricts commands to one exact channel
 
 3. Start the bot:
    ```bash
@@ -231,7 +231,7 @@ A Discord bot written in Go that generates secure, time-limited invitation links
    ```
 
 5. Test the bot in Discord:
-   - Type `/invite` in any Discord channel
+   - Type `/invite` in the configured command channel
    - The bot should respond with an invite link
 
 ## Configuration
@@ -244,7 +244,8 @@ All configuration is done through environment variables:
 | `AUTHENTIK_URL` | Yes | Base URL of Authentik instance | `https://authentik.example.com` |
 | `AUTHENTIK_TOKEN` | Yes | Authentik API token with invitation permissions | `gho_16C7e42F292c6912E7710c838...` |
 | `AUTHENTIK_FLOW_SLUG` | Yes | Slug of the enrollment/invitation flow | `default-enrollment-flow` |
-| `INVITE_EXPIRATION_HOURS` | No | Default expiration time in hours (default: 24) | `48` || `COMMAND_CHANNEL_ID` | No | Discord channel ID to restrict commands to (omit for all channels) | `1234567890123456789` |
+| `INVITE_EXPIRATION_HOURS` | No | Default expiration time in hours (default: 24) | `48` |
+| `COMMAND_CHANNEL_ID` | Yes | Exact Discord command channel; startup fails if missing | `1234567890123456789` |
 ### Getting Authentik API Token
 
 1. Log in to your Authentik admin panel
@@ -570,3 +571,17 @@ Potential improvements:
 - [ ] Multiple flow support
 - [ ] Prometheus metrics
 - [ ] Invite tracking/analytics
+
+
+## Optional recovery commands
+
+`/password-reset-email username:<exact username>` and `/mfa-reset username:<exact username>`
+are disabled and unregistered by default. Both require a separate non-superuser
+service credential, explicit Discord caller and target allowlists, a guild and the
+existing exact command channel, durable audit storage, and a two-minute ephemeral
+Confirm/Cancel preview. Default MFA scope is TOTP only.
+
+Read [RECOVERY.md](RECOVERY.md) for every proposed environment variable, least
+privilege prerequisites, limitations, and approval-gated deployment/rollback.
+Existing `/invite`, `/group list/add/remove`, and `/user list` remain available.
+The recovery credential never replaces or falls back to the legacy credential.
