@@ -575,8 +575,8 @@ Potential improvements:
 
 ## Optional recovery commands
 
-`/password reset user:<exact username>` initiates Authentik's native
-anonymous email-link recovery and stops at the email challenge. `/mfa reset
+`/authctl password reset user:<exact username>` initiates Authentik's native
+anonymous email-link recovery and stops at the email challenge. `/authctl mfa reset
 user:<exact username>` deletes only the previewed TOTP enrollments. Both are
 disabled and unregistered by default.
 

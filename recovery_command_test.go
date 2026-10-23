@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-func groupedRecoveryData(command, user string) discordgo.ApplicationCommandInteractionData {
-	return discordgo.ApplicationCommandInteractionData{Name: command, Options: []*discordgo.ApplicationCommandInteractionDataOption{{Name: "reset", Type: discordgo.ApplicationCommandOptionSubCommand, Options: []*discordgo.ApplicationCommandInteractionDataOption{{Name: "user", Type: discordgo.ApplicationCommandOptionString, Value: user}}}}}
+func groupedRecoveryData(group, user string) discordgo.ApplicationCommandInteractionData {
+	return discordgo.ApplicationCommandInteractionData{Name: authctlCommand, Options: []*discordgo.ApplicationCommandInteractionDataOption{{Name: group, Type: discordgo.ApplicationCommandOptionSubCommandGroup, Options: []*discordgo.ApplicationCommandInteractionDataOption{{Name: "reset", Type: discordgo.ApplicationCommandOptionSubCommand, Options: []*discordgo.ApplicationCommandInteractionDataOption{{Name: "user", Type: discordgo.ApplicationCommandOptionString, Value: user}}}}}}}
 }
 func TestRecoveryGroupedCommandTree(t *testing.T) {
 	old := recovery
@@ -14,29 +14,38 @@ func TestRecoveryGroupedCommandTree(t *testing.T) {
 	f := newRecoveryFixture(t)
 	recovery = f.r
 	commands := recoveryCommands()
-	if len(commands) != 2 {
-		t.Fatal("expected two recovery roots")
+	if len(commands) != 1 || commands[0].Name != authctlCommand {
+		t.Fatal("expected one authctl root")
 	}
-	for index, want := range []string{passwordCommand, mfaCommand} {
-		c := commands[index]
-		if c.Name != want || c.DefaultMemberPermissions == nil || *c.DefaultMemberPermissions != 0 || c.Contexts == nil || len(*c.Contexts) != 1 || (*c.Contexts)[0] != discordgo.InteractionContextGuild {
-			t.Fatal("command security/context changed")
+	root := commands[0]
+	if root.DefaultMemberPermissions == nil || *root.DefaultMemberPermissions != 0 || root.Contexts == nil || len(*root.Contexts) != 1 || (*root.Contexts)[0] != discordgo.InteractionContextGuild {
+		t.Fatal("root security/context changed")
+	}
+	if len(root.Options) != 2 {
+		t.Fatal("expected password and MFA groups")
+	}
+	for i, want := range []string{passwordCommand, mfaCommand} {
+		g := root.Options[i]
+		if g.Type != discordgo.ApplicationCommandOptionSubCommandGroup || g.Name != want || len(g.Options) != 1 {
+			t.Fatal("wrong recovery group")
 		}
-		if len(c.Options) != 1 || c.Options[0].Name != "reset" || c.Options[0].Type != discordgo.ApplicationCommandOptionSubCommand {
+		sub := g.Options[0]
+		if sub.Name != "reset" || sub.Type != discordgo.ApplicationCommandOptionSubCommand || len(sub.Options) != 1 {
 			t.Fatal("missing reset subcommand")
 		}
-		o := c.Options[0].Options
-		if len(o) != 1 || o[0].Name != "user" || o[0].Type != discordgo.ApplicationCommandOptionString || !o[0].Required || o[0].Autocomplete {
-			t.Fatal("wrong exact-user argument")
+		user := sub.Options[0]
+		if user.Name != "user" || user.Type != discordgo.ApplicationCommandOptionString || !user.Required || user.Autocomplete {
+			t.Fatal("wrong exact user argument")
 		}
 	}
 	f.r.cfg.EmailEnabled = false
-	if c := recoveryCommands(); len(c) != 1 || c[0].Name != mfaCommand {
+	c := recoveryCommands()
+	if len(c) != 1 || len(c[0].Options) != 1 || c[0].Options[0].Name != mfaCommand {
 		t.Fatal("feature switch changed")
 	}
 	f.r.cfg.MFAEnabled = false
 	if len(recoveryCommands()) != 0 {
-		t.Fatal("disabled commands registered")
+		t.Fatal("disabled root registered")
 	}
 }
 func TestRecoveryGroupedRoutingAndAuthorization(t *testing.T) {
@@ -98,7 +107,7 @@ func TestRecoveryGroupedRoutingAndAuthorization(t *testing.T) {
 	}
 }
 func TestRecoveryGroupedMalformedAndRetiredCommandsFailClosed(t *testing.T) {
-	for _, which := range []string{"retired email", "retired MFA", "missing reset", "nil subcommand", "wrong action", "action choice", "missing user", "nil user", "username alias", "wrong user type", "wrong value type", "duplicate user", "extra subcommand"} {
+	for _, which := range []string{"retired email", "retired MFA", "retired password root", "retired mfa root", "missing group", "nil group", "unknown group", "group wrong type", "missing reset", "nil subcommand", "wrong action", "action choice", "missing user", "nil user", "username alias", "wrong user type", "wrong value type", "duplicate user", "extra subcommand", "extra group"} {
 		t.Run(which, func(t *testing.T) {
 			f := newRecoveryFixture(t)
 			d := groupedRecoveryData(passwordCommand, "alice")
@@ -107,32 +116,46 @@ func TestRecoveryGroupedMalformedAndRetiredCommandsFailClosed(t *testing.T) {
 				d.Name = emailAction
 			case "retired MFA":
 				d.Name = mfaAction
-			case "missing reset":
+			case "retired password root":
+				d.Name = passwordCommand
+			case "retired mfa root":
+				d.Name = mfaCommand
+			case "missing group":
 				d.Options = nil
-			case "nil subcommand":
+			case "nil group":
 				d.Options[0] = nil
-			case "wrong action":
-				d.Options[0].Name = "remove"
-			case "action choice":
-				d.Options[0].Type = discordgo.ApplicationCommandOptionString
-				d.Options[0].Value = "reset"
-			case "missing user":
+			case "unknown group":
+				d.Options[0].Name = "other"
+			case "group wrong type":
+				d.Options[0].Type = discordgo.ApplicationCommandOptionSubCommand
+			case "missing reset":
 				d.Options[0].Options = nil
-			case "nil user":
+			case "nil subcommand":
 				d.Options[0].Options[0] = nil
+			case "wrong action":
+				d.Options[0].Options[0].Name = "remove"
+			case "action choice":
+				d.Options[0].Options[0].Type = discordgo.ApplicationCommandOptionString
+				d.Options[0].Options[0].Value = "reset"
+			case "missing user":
+				d.Options[0].Options[0].Options = nil
+			case "nil user":
+				d.Options[0].Options[0].Options[0] = nil
 			case "username alias":
-				d.Options[0].Options[0].Name = "username"
+				d.Options[0].Options[0].Options[0].Name = "username"
 			case "wrong user type":
-				d.Options[0].Options[0].Type = discordgo.ApplicationCommandOptionUser
+				d.Options[0].Options[0].Options[0].Type = discordgo.ApplicationCommandOptionUser
 			case "wrong value type":
-				d.Options[0].Options[0].Value = true
+				d.Options[0].Options[0].Options[0].Value = true
 			case "duplicate user":
-				d.Options[0].Options = append(d.Options[0].Options, d.Options[0].Options[0])
+				d.Options[0].Options[0].Options = append(d.Options[0].Options[0].Options, d.Options[0].Options[0].Options[0])
 			case "extra subcommand":
+				d.Options[0].Options = append(d.Options[0].Options, d.Options[0].Options[0])
+			case "extra group":
 				d.Options = append(d.Options, d.Options[0])
 			}
 			if _, _, err := f.r.previewCommand(f.ctx, d); err == nil || len(f.requests) != 0 || len(f.r.pending) != 0 {
-				t.Fatal("malformed command reached eligibility or confirmation")
+				t.Fatal("malformed command reached eligibility/confirmation")
 			}
 			if got := f.audit.statuses(); len(got) != 1 || got[0] != "denied" {
 				t.Fatal("invalid command not audited")

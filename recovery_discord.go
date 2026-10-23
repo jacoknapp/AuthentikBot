@@ -11,6 +11,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+const authctlCommand = "authctl"
 const passwordCommand = "password"
 const mfaCommand = "mfa"
 
@@ -18,7 +19,7 @@ func recoveryCommands() []*discordgo.ApplicationCommand {
 	if recovery == nil {
 		return nil
 	}
-	var commands []*discordgo.ApplicationCommand
+	var groups []*discordgo.ApplicationCommandOption
 	for _, entry := range []struct {
 		name, description string
 		enabled           bool
@@ -29,17 +30,20 @@ func recoveryCommands() []*discordgo.ApplicationCommand {
 		if !entry.enabled {
 			continue
 		}
-		permissions := int64(0)
-		contexts := []discordgo.InteractionContextType{discordgo.InteractionContextGuild}
-		commands = append(commands, &discordgo.ApplicationCommand{Name: entry.name, Description: entry.description, DefaultMemberPermissions: &permissions, Contexts: &contexts, Options: []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionSubCommand, Name: "reset", Description: "Preview and confirm recovery for an eligible user", Options: []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionString, Name: "user", Description: "Exact Authentik username; ordinary human accounts only", Required: true}}}}})
+		groups = append(groups, &discordgo.ApplicationCommandOption{Type: discordgo.ApplicationCommandOptionSubCommandGroup, Name: entry.name, Description: entry.description, Options: []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionSubCommand, Name: "reset", Description: "Preview and confirm recovery for an eligible user", Options: []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionString, Name: "user", Description: "Exact Authentik username; ordinary human accounts only", Required: true}}}}})
 	}
-	return commands
+	if len(groups) == 0 {
+		return nil
+	}
+	permissions := int64(0)
+	contexts := []discordgo.InteractionContextType{discordgo.InteractionContextGuild}
+	return []*discordgo.ApplicationCommand{{Name: authctlCommand, Description: "Authentik account recovery operations", DefaultMemberPermissions: &permissions, Contexts: &contexts, Options: groups}}
 }
 func isRecoveryInteraction(i *discordgo.InteractionCreate) bool {
 	if i.Type == discordgo.InteractionApplicationCommand {
 		name := i.ApplicationCommandData().Name
 		// Retired flat names are routed here only to reject stale Discord clients.
-		return name == passwordCommand || name == mfaCommand || name == emailAction || name == mfaAction
+		return name == authctlCommand || name == passwordCommand || name == mfaCommand || name == emailAction || name == mfaAction
 	}
 	if i.Type == discordgo.InteractionMessageComponent {
 		return strings.HasPrefix(i.MessageComponentData().CustomID, "recovery:")
@@ -50,7 +54,14 @@ func isRecoveryInteraction(i *discordgo.InteractionCreate) bool {
 // The Discord tree is presentation only: internal action IDs stay stable so
 // authorization, confirmations, cooldowns and audit semantics do not change.
 func parseRecoveryCommand(data discordgo.ApplicationCommandInteractionData) (action, user string, valid bool) {
-	switch data.Name {
+	if data.Name != authctlCommand || len(data.Options) != 1 || data.Options[0] == nil {
+		return "", "", false
+	}
+	group := data.Options[0]
+	if group.Type != discordgo.ApplicationCommandOptionSubCommandGroup || len(group.Options) != 1 || group.Options[0] == nil {
+		return "", "", false
+	}
+	switch group.Name {
 	case passwordCommand:
 		action = emailAction
 	case mfaCommand:
@@ -58,10 +69,7 @@ func parseRecoveryCommand(data discordgo.ApplicationCommandInteractionData) (act
 	default:
 		return "", "", false
 	}
-	if len(data.Options) != 1 || data.Options[0] == nil {
-		return "", "", false
-	}
-	sub := data.Options[0]
+	sub := group.Options[0]
 	if sub.Type != discordgo.ApplicationCommandOptionSubCommand || sub.Name != "reset" || len(sub.Options) != 1 || sub.Options[0] == nil {
 		return "", "", false
 	}
@@ -75,7 +83,7 @@ func parseRecoveryCommand(data discordgo.ApplicationCommandInteractionData) (act
 func (r *recoveryService) previewCommand(c recoveryContext, data discordgo.ApplicationCommandInteractionData) (string, recoveryPending, error) {
 	action, user, valid := parseRecoveryCommand(data)
 	if !valid {
-		err := errors.New("Use /password reset user:<username> or /mfa reset user:<username>")
+		err := errors.New("Use /authctl password reset user:<username> or /authctl mfa reset user:<username>")
 		if e := r.record(c, "recovery-command", 0, "denied", 0); e != nil {
 			err = e
 		}
