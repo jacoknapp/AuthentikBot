@@ -575,9 +575,9 @@ Potential improvements:
 
 ## Optional recovery commands
 
-`/password-reset-email username:<exact username>` initiates Authentik's native
-anonymous email-link recovery and stops at the email challenge. `/mfa-reset
-username:<exact username>` deletes only the previewed TOTP enrollments. Both are
+`/password reset user:<exact username>` initiates Authentik's native
+anonymous email-link recovery and stops at the email challenge. `/mfa reset
+user:<exact username>` deletes only the previewed TOTP enrollments. Both are
 disabled and unregistered by default.
 
 Recovery requires an explicitly selected credential mode, explicit Discord
