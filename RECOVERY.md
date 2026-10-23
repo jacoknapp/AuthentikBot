@@ -1,310 +1,314 @@
-# Recovery implementation review — activation is separate
+# Native recovery email and TOTP reset — source review
 
-This change implements `/password-reset-email username:<exact username>` and
-`/mfa-reset username:<exact username>`. Both are **off by default** and absent
-from command registration until their switch is enabled. Stale Discord commands
-and confirmation buttons still fail closed. No deployed config is changed by
-this source change. No credential, actual caller ID, guild ID, or target allowlist
-is supplied. Caller confirmation authorizes only a previously activated operation;
-it is not approval to activate, publish, deploy, or change Authentik configuration.
+This implementation follows the revised October 23 scope. The parent owns
+credentials, Authentik settings, publication, build, activation and deployment.
+the operator subsequently explicitly approved reusing the existing bot superuser credential.
+The deployed choice requires explicit opt-in and a pinned account ID; no new
+credential or Vault change is needed. Admin exclusion remains bot-enforced.
 
-## Proposed environment
+This source task makes no live recovery requests, sends no email, changes no
+accounts or login/recovery flows, and deletes no real enrollment. Mock HTTP and
+Discord transports run entirely in memory. Both features remain off by default.
 
-| Variable | Default | Requirement when enabled |
+## Commands and controls
+
+- `/password-reset-email username:<exact username>`: prevalidate a human account,
+  obtain an ephemeral confirmation, then initiate the configured native anonymous
+  recovery flow with that username and stop at `ak-stage-email`.
+- `/mfa-reset username:<exact username>`: preview the exact TOTP enrollment count,
+  confirm, and delete only those TOTP IDs. Other enrollment types are preserved.
+
+Only configured explicit Discord callers in the exact configured guild and the
+existing exact `COMMAND_CHANNEL_ID` may preview, confirm, or cancel. DMs and missing
+configuration deny access. Recovery does not inherit the old channel-member
+fallback or optional legacy `REQUIRED_ROLE_ID` behavior. Command registration
+limits context to guilds and defaults member permissions to zero; Discord's own
+visibility settings never bypass the bot's caller check.
+
+Confirmation is ephemeral, opaque, single-use, bound to caller/channel/guild,
+action, target PK/UUID, user metadata and permission/enrollment snapshots, and
+expires after two minutes. Claims are atomic. Preview creates no flow session or
+email. Target/caller authorization is revalidated at confirmation and immediately
+before each mutation-capable request. There is a five-second per-caller preview
+rate limit, five-minute target cooldown including failed/cancelled previews, one
+pending/executing request per target username across both commands, and a
+128-target pending/cooldown capacity. Expired entries are pruned. Mentions are
+disabled in every recovery response.
+
+Run one bot instance. Pending state/cooldowns are in memory, reset on restart,
+and are not coordinated across replicas. An old button remains unusable after
+consumption, expiry, restart, or feature disablement.
+
+## Environment and defaults
+
+| Variable | Default | Enabled-feature requirement |
 | --- | --- | --- |
-| `RECOVERY_EMAIL_ENABLED` | `false` | Literal `true` enables password email command |
-| `RECOVERY_MFA_ENABLED` | `false` | Literal `true` enables enrollment deletion command |
-| `RECOVERY_AUTHENTIK_TOKEN` | unset | Separate token; equal-to-legacy token rejected; no fallback |
-| `RECOVERY_SERVICE_USERNAME` | unset | Exact expected active `service_account` username, never a superuser |
-| `RECOVERY_GUILD_ID` | unset | Exact Discord guild ID; DMs always denied |
-| `RECOVERY_DISCORD_USER_IDS` | unset | Comma-separated explicit Discord user IDs; initially the operator only, exact ID to be approved |
-| `RECOVERY_TARGET_USERNAMES` | unset | Comma-separated exact ordinary internal usernames; explicit list to be approved |
-| `RECOVERY_EMAIL_STAGE_UUID` | `5780da44-a43d-4791-b14e-e880cc8aa895` | Operator-selected email stage; no caller choice |
-| `RECOVERY_FLOW_SLUG` | unset | Exact recovery-flow slug expected on the current brand; required for email |
-| `RECOVERY_MFA_FACTOR_TYPES` | `totp` | Explicit comma-separated subset of `totp,webauthn,static,email,sms,duo`; unknown/empty lists rejected |
-| `RECOVERY_AUDIT_PATH` | unset | Absolute path to a durable private regular file in a private writable directory; no symlink |
-| `COMMAND_CHANNEL_ID` | existing required value | Existing exact channel lock is independently enforced for recovery |
-| `AUTHENTIK_URL` | existing required value | Recovery requires an HTTPS origin with no path, userinfo, query, or fragment |
-| `IMMUTABLE_USERNAMES` | existing value | Existing protections also apply case-insensitively to recovery |
+| `RECOVERY_EMAIL_ENABLED` | `false` | Literal `true` registers/enables native email initiation |
+| `RECOVERY_MFA_ENABLED` | `false` | Literal `true` registers/enables TOTP deletion |
+| `RECOVERY_USE_EXISTING_AUTHENTIK_TOKEN` | `false` | Explicit `true` reuses the existing `AUTHENTIK_TOKEN` in memory |
+| `RECOVERY_EXPECTED_USER_ID` | unset | Positive pinned Authentik user ID; mandatory in existing-credential mode |
+| `RECOVERY_AUTHENTIK_TOKEN` | unset | Separate credential in default mode; must be absent when reusing existing credentials |
+| `RECOVERY_SERVICE_USERNAME` | unset | Exact expected identity: active internal superuser for explicit reuse, non-superuser `service_account` otherwise |
+| `RECOVERY_GUILD_ID` | unset | Exact guild ID |
+| `RECOVERY_DISCORD_USER_IDS` | unset | Explicit comma-separated Discord user IDs; maximum 128 |
+| `RECOVERY_FLOW_SLUG` | unset | Explicit pinned recovery slug; required for native email; letters/digits/underscore/hyphen only |
+| `RECOVERY_MFA_FACTOR_TYPES` | `totp` | Compatibility setting; only `totp` is accepted; other values rejected |
+| `RECOVERY_AUDIT_PATH` | unset | Absolute path to private regular durable JSONL audit file |
+| `COMMAND_CHANNEL_ID` | existing required value | Same exact existing channel lock, independently enforced |
+| `AUTHENTIK_URL` | existing required value | HTTPS origin only; no path, query, fragment or embedded credentials |
+| `IMMUTABLE_USERNAMES` | existing value | Case-insensitive exclusions also apply to recovery |
 
-Keep all existing config unchanged. `AUTHENTIK_TOKEN`, existing roles, and
-`REQUIRED_ROLE_ID` are not reused for recovery authorization. Enabled recovery
-with missing/invalid config or unusable audit storage stops startup, before the
-Discord connection. Disabled recovery never reads the legacy token for API use.
-Switches accept only `true`, `false`, or unset. Allowlists are capped at 128 entries.
-Configuration is fixed for a process; changing it requires a bot-only recreation,
-which also invalidates outstanding confirmations.
+`RECOVERY_TARGET_USERNAMES` and `RECOVERY_EMAIL_STAGE_UUID` are obsolete and no
+longer read. There is no target allowlist and no caller-selected factor, stage,
+flow, destination email, query, URL, token, next parameter or context override.
+Missing/invalid enabled-feature configuration or unavailable audit setup stops
+startup before connecting to Discord. Legacy production startup requirements
+are preserved; tests no longer depend on package `init` reading credentials.
 
-The repository's sample Compose file explicitly passes legacy variables only.
-Do not infer that new recovery variables in a local `.env` reach that container.
-The verified production service instead uses `<private-deployment-path>` via `env_file`.
-No Compose changes are included in this implementation.
+Caller/application identities and guild/channel identifiers must be resolved and configured privately for each installation.
 
-## Deployment configuration
+The repository's sample Compose explicitly passes legacy variables only. New
+values in a local `.env` do not automatically reach that sample service. The
+verified production service uses `<private-deployment-path>` through `env_file`.
+No Compose or credential files are changed here.
 
-Supply installation-specific caller, guild, channel, service-identity and storage settings privately. No live installation values are included here.
+## Dynamic account eligibility
 
-## Interaction and target controls
+Exact, uniquely resolved usernames are required. Active `internal` and `external`
+human accounts can qualify now or after creation without bot configuration or
+per-user grants. Exclusions include superusers, the service identity, service and
+internal-service types, immutable names, reserved anonymous/system usernames,
+unknown types, and users in Authentik's reserved `goauthentik.io` path hierarchy.
+Missing active/superuser/email/path/UUID/update metadata fails closed. PK, UUID,
+username, account type, email, path and last-updated metadata remain bound to the
+preview. `is_superuser` already includes ancestor-group superuser membership.
 
-1. Each recovery interaction requires an allowlisted Discord member in the
-   configured guild and exact command channel. Existing permissive channel-member
-   access and optional role checks cannot authorize recovery. Command registration
-   is guild-context only with zero default member permissions; Discord command
-   visibility overrides may be needed for an approved non-administrator caller.
-   These visibility settings cannot bypass application authorization.
-2. The username must be a single exact allowlisted username. No autocomplete,
-   wildcard, bulk input, caller-selected API endpoint, stage, flow, or factor scope.
-   User pagination uses Authentik's numeric pagination envelope, preserves the
-   exact username filter, and refuses ambiguous matches or inconsistent pages.
-3. Targets must be active `internal` users with explicit false `is_superuser`.
-   Service/external/internal-service accounts, immutable names and the recovery
-   service identity are denied. Missing security fields deny access. Username,
-   PK, UUID, email, last-updated metadata, and eligibility are checked again before
-   mutation. The service identity is independently checked via `/core/users/me/`
-   before preview and immediately before each write; an impersonated identity,
-   inactive account, unexpected name/type, or superuser fails closed.
-A non-superuser may still have powerful RBAC roles or group-inherited permissions.
-The operator must review effective privileges for each exact target before
-approving its allowlist entry and object grants. The bot does not automatically
-classify all non-superuser administrative roles.
+Administrative capability is determined from effective grants, never role/group
+names. The bot reads every paginated effective role with
+`GET /api/v3/rbac/roles/?users=<pk>&inherited=true`, including direct, group and
+ancestor-group roles. For each role UUID it reads:
 
-4. Preview is ephemeral and names the target and exact configured MFA scope/count,
-   including zero counts. Confirm/Cancel use random opaque 192-bit handles, not
-   API tokens or target data. The stored action/target/snapshot is bound to the
-   caller/channel/guild; confirmation rechecks those restrictions. Handles expire
-   after two minutes and are atomically consumed. There is at most one pending or
-   executing operation per target across both actions, at most 128 pending targets,
-   a five-minute target cooldown from preview attempt (including failure/cancel),
-   and a five-second per-allowed-caller preview rate limit. Expired state is pruned.
-5. Mentions are disabled in every recovery response, including echoed usernames.
-   Discord errors are not printed because they may contain webhook tokens.
+- `GET /api/v3/rbac/permissions/?role=<uuid>` for global/model permissions;
+- `GET /api/v3/rbac/permissions/roles/?uuid=<uuid>&page_size=10` for object grants.
 
-## Password EMAIL behavior and prerequisites
+The conservative ordinary set is exactly `authentik_core.view_application` on
+model `application` and `authentik_providers_ldap.search_full_directory` on model
+`ldapprovider`. Every other returned explicit grant protects the target,
+including admin interface access, user/group/role/token/MFA/flow/provider/policy
+management and unknown/custom grants. Accounts with no effective roles can be ordinary. Missing,
+malformed, duplicate, unreadable or inconsistent metadata denies access.
 
-The only password mutation route used is
-`POST /api/v3/core/users/{pk}/recovery_email/` with exactly
-`{"email_stage":"<operator-configured UUID>"}`. It never calls `recovery/`,
-`set_password/`, or password-hash endpoints and never reads a generated link.
-The target must have an email; the current brand must expose exactly the configured
-recovery-flow slug; the configured email stage must be viewable and match its UUID.
-These checks run during preview and confirmation before any generation request.
-The server still decides whether the flow is applicable. An API failure is redacted
-and stops the action; the bot does not attempt to plan a flow or generate a link
-as a preflight test. Only HTTP 204 is treated as accepted/queued, never as guaranteed
-email delivery. No automatic retries after an interrupted or failed write.
+Snapshots include role UUIDs and every returned permission assignment ID,
+app/model/codename and global/object scope. Two consecutive full scans must
+agree, with role IDs rechecked after collecting grants. Fingerprints must still
+match preview at confirmation and before each native submission or TOTP delete;
+even an ordinary role/scope change requires a fresh preview. Pagination never
+follows a response URL, validates all required envelope fields and stable
+count/page totals, and has 100-page/10,000-record bounds. Exceeding a bound denies.
 
-The supplied deployment evidence says Authentik 2026.8.5's sole/default active
-brand `authentik-default` has `flow_recovery=null`. `default-recovery-flow` exists
-but is unassigned. Email is therefore blocked until an independently approved
-brand assignment. Assigning a recovery flow to the active brand can expose
-brand-level/self-service recovery beyond the bot caller allowlist; approve this
-effect explicitly. The existing flow includes MFA validation: a password email
-does not promise bypass of MFA or recovery for someone who has lost all factors.
-The existing `default-recovery-email` stage uses global `<configured-SMTP-relay>` and
-`email/password_reset.html`; delivery has not been tested. This task changes
-none of those settings and sends no email.
+**Global grant completeness cross-check:** official 2026.8.5
+`RBACPermissionViewSet.get_queryset()` filters app labels to those starting with
+`authentik`. The catalog alone could hide a global `guardian.*` or third-party
+grant. For each role, the bot additionally queries the read-only
+`GET /api/v3/rbac/permissions/assigned_by_roles/?model=<ordinary app.model>`
+(and `object_pk` when anchored on an object grant). The model/object filter
+selects roles; its serializer returns **all** nested global/model and object
+assignments for each selected role. The target role must be present with both
+complete arrays. Unknown hidden grants, scope disagreements, duplicates or
+changed assignment IDs deny access. No role/permission mutation endpoint is used.
+This endpoint requires the already proposed global role visibility, not additional
+write privileges. The code and mocks verify the supplemental serializer contract;
+parent still owns live read-only RBAC qualification with the new credential.
 
-## MFA behavior and API evidence
+**Empty roles with verified full visibility:** in explicit existing-credential mode,
+each validation requires the pinned identity to remain an active internal
+superuser before and after the target scan. Only that proof allows an apparently
+empty role to be checked through `GET /rbac/roles/<uuid>/used_by/`. The deployed
+source filters references by read permissions; a superuser sees all guardian
+assignment references. Any guardian reference, malformed/duplicate metadata or
+read failure denies the target. A truly empty role can qualify. Non-superuser
+separate-credential mode retains conservative denial for unanchored roles;
+accounts with no effective roles qualify in either mode. No roles are altered.
 
-Snapshot enumeration uses only
-`GET /api/v3/authenticators/admin/all/?user={exact target pk}`. In 2026.8.5 this is
-an **unpaginated metadata array** with string `pk`, model `type`, name, confirmed,
-created, last_updated and last_used. The bot decodes those fields only. It never
-calls per-factor list/retrieve endpoints: the static serializer exposes
-`token_set`, which would read recovery codes. Unknown model types or malformed or
-duplicate IDs fail closed.
+**External promotion race:** these APIs do not offer a transaction/precondition
+spanning reads, native identification and deletion. The bot detects observed
+promotion/role changes and serializes its own requests; another administrator
+can still change account/grants or identifier collisions after the last read. No atomic server guarantee
+is claimed. A stolen TOTP-delete token can bypass application-level exclusion.
 
-All visible enrollment metadata, including factors outside the deletion scope,
-is compared before each deletion. New, removed, renamed, updated, used, or
-confirmation-state-changed enrollments abort the operation. Deletion uses only
-IDs in the confirmed preview, only in the operator-configured factor scope:
-`DELETE /api/v3/authenticators/admin/{totp|webauthn|static|email|sms|duo}/{id}/`.
-After each successful 204, only that ID is removed from the expected snapshot.
-Any failure stops further deletions and reports the confirmed deletion count;
-partial deletion is audited as `partial`. No rollback or automatic retry occurs.
-The preview count includes unconfirmed enrollment records if returned by the
-admin endpoint; “confirmed deletion count” in results means HTTP-acknowledged
-operations, not the enrollment's `confirmed` flag.
+## Native email protocol and ambiguity protection
 
-Removing an Authentik Duo enrollment does not reset Duo upstream. Removing an
-Authentik enrollment does not disable mandatory MFA policy. Re-enrollment or
-access recovery may still require a separately approved administrator procedure.
+The authenticated recovery API client is used only for read-only eligibility and
+TOTP deletion. It rejects other mutation routes, including password-change and
+privileged recovery routes. Recovery never calls the legacy invite/group/user
+helpers or their raw-body error paths.
 
-Official version-pinned source used for implementation:
+For each confirmed email action a separate anonymous HTTP client and fresh
+in-memory cookie jar are created. Cookies persist only inside that action,
+never on disk or across users. No Authorization/Bearer header is sent. Native
+requests retain `Accept: application/json` and the exact stable `query=` value.
+The configured HTTPS origin and exact executor path are pinned:
 
-- [User recovery email and prerequisites](https://github.com/goauthentik/authentik/blob/version/2026.8.5/authentik/core/api/users.py).
-- [Metadata-only admin enumeration and permission filtering](https://github.com/goauthentik/authentik/blob/version/2026.8.5/authentik/core/api/devices.py).
-- [Numeric pagination](https://github.com/goauthentik/authentik/blob/version/2026.8.5/authentik/api/pagination.py).
-- [Current-brand recovery flow](https://github.com/goauthentik/authentik/blob/version/2026.8.5/authentik/brands/api.py).
-- [Email stage serializer](https://github.com/goauthentik/authentik/blob/version/2026.8.5/authentik/stages/email/api.py).
-- [TOTP](https://github.com/goauthentik/authentik/blob/version/2026.8.5/authentik/stages/authenticator_totp/api.py),
-  [WebAuthn](https://github.com/goauthentik/authentik/blob/version/2026.8.5/authentik/stages/authenticator_webauthn/api/devices.py),
-  [static](https://github.com/goauthentik/authentik/blob/version/2026.8.5/authentik/stages/authenticator_static/api.py),
-  [email](https://github.com/goauthentik/authentik/blob/version/2026.8.5/authentik/stages/authenticator_email/api.py),
-  [SMS](https://github.com/goauthentik/authentik/blob/version/2026.8.5/authentik/stages/authenticator_sms/api.py).
+1. `GET /api/v3/flows/executor/<RECOVERY_FLOW_SLUG>/?query=`.
+2. Require `ak-stage-identification`, explicit `password_fields=false`, username
+   support and recovery designation, no CAPTCHA/passkey requirement, no validation
+   error or prior pending
+   identity. No unsupported challenge is answered.
+3. Renew credential/target/grant checks and identifier uniqueness, audit the
+   write attempt, then make exactly one POST with only
+   `{"component":"ak-stage-identification","uid_field":"<exact username>"}`.
+4. Follow at most five same-origin, same-exact-executor-path redirects with cookies,
+   Accept and `query=` preserved. Only an omitted query or a single empty `query`
+   is permitted on redirect; all other query parameters, paths, hosts, fragments,
+   userinfo or HTTPS downgrades stop the request. HTTP 307/308 after POST are
+   rejected to prevent identification replay. Same-path nonterminal redirect
+   challenges can be followed; terminal flow redirects are refused.
+5. Stop at `ak-stage-email`. Never POST to it, retry a challenge, respond to a
+   password/MFA/setup stage, follow/consume an email reset link, or complete the
+   flow. Real native transports disable connection reuse to avoid implicit replay
+   of a stateful GET. Uncertain requests are never automatically retried.
 
-## Proposed least privilege prerequisites — do not grant as part of this change
+Native identification matches username OR email case-insensitively and takes
+the first result. Before submission, all paginated visible user metadata is
+scanned without excluding inactive or administrative accounts. Full Unicode case-folded
+username/email collisions, case variants, mismatched PK/UUID or incomplete
+metadata deny initiation; both fields matching the same exact target is allowed.
+Identifier folding uses Go simple-fold tables plus pinned Unicode full-fold
+expansion data in `recovery_casefold.go` (generated from installed Python Unicode
+14.0.0 data), with conservative upper/lower equivalents; it requires no new
+module or runtime data download. The selected target must have an existing
+email. No destination override is sent.
+This matters because unknown identifiers can intentionally receive an email-sent
+challenge without a real email being sent.
 
-After exact activation approval, an administrator would need to provision a
-**new non-superuser service account and separate API token** with an agreed expiry,
-rotation owner, exact username, and no Authentik Admins membership or inherited
-superuser privilege. Never reuse the operator's existing legacy credential. No group,
-role, permission, flow, credential, or account changes have been made here.
+Success says **native recovery request submitted; inbox delivery is not guaranteed**.
+Errors/redirects/unexpected stages stop safely without response bodies, cookies,
+links or transport error strings in Discord/logs. A request may have sent email
+before a response is lost; operator review is required before trying again.
 
-Start with object-scoped permissions and verify read access before considering
-activation. Do not broaden permissions to make an API error disappear:
+No `reset_user_password` privilege, email-stage-view privilege or brand recovery
+assignment is needed for native initiation. `flow_recovery=null` on the current
+brand does not block this pinned public executor path. Source inspection and
+mock protocol verification do not establish inbox delivery or live flow success.
 
-| Purpose | Proposed Authentik permissions |
-| --- | --- |
-| Identify token | Read its own identity via `GET /api/v3/core/users/me/`; must return active `service_account`, exact name, false superuser |
-| Resolve/recheck allowed users | `authentik_core.view_user` scoped to the explicitly approved target objects where supported |
-| Password email | `authentik_core.reset_user_password` scoped to each approved target object; `authentik_stages_email.view_emailstage` scoped to the chosen stage |
-| Current recovery-flow check | Current-brand endpoint is read-only/public; no brand/flow change permission needed |
-| Enrollment metadata/deletion | Per factor below: view permissions for metadata, delete only for approved deletion scope; object scope where feasible |
+## TOTP reset and verified re-enrollment limitation
 
-| Factor | Model permission prefix (append `view_…` / `delete_…`) |
-| --- | --- |
-| TOTP | `authentik_stages_authenticator_totp.view_totpdevice` / `delete_totpdevice` |
-| WebAuthn/passkeys | `authentik_stages_authenticator_webauthn.view_webauthndevice` / `delete_webauthndevice` |
-| Static/recovery codes | `authentik_stages_authenticator_static.view_staticdevice` / `delete_staticdevice` |
-| Email | `authentik_stages_authenticator_email.view_emaildevice` / `delete_emaildevice` |
-| SMS | `authentik_stages_authenticator_sms.view_smsdevice` / `delete_smsdevice` |
-| Duo | `authentik_stages_authenticator_duo.view_duodevice` / `delete_duodevice` |
+Only metadata from `GET /api/v3/authenticators/admin/all/?user=<exact pk>` is
+read: PK, model type, name, confirmed, created/last-updated/last-used. No per-factor
+list/retrieve is used; the static-device serializer can expose recovery codes.
+All visible metadata is snapshotted; unknown/duplicate/malformed records deny.
+Only previewed TOTP IDs can be deleted using
+`DELETE /api/v3/authenticators/admin/totp/<id>/`, after renewed identity, eligibility,
+permission fingerprint and enrollment snapshot checks before each deletion.
+A 204 increments the acknowledged deletion count. Failure stops further work,
+reports partial/uncertain results truthfully, and never retries or restores devices.
 
-For example `delete_totpdevice` above means the full permission
-`authentik_stages_authenticator_totp.delete_totpdevice`. No user/group/role mutation,
-impersonation, token creation, flow editing or service-account creation permissions
-are required. The password-reset permission also authorizes other sensitive server
-routes; the bot's strict route selection is an additional control, not a narrower
-server permission. Keep this token private and scoped to intended targets.
+The proposed token has only TOTP device view/delete permissions. Other factors
+may be invisible to `admin/all`; complete cross-factor visibility is not claimed.
+TOTP snapshot freshness is the guaranteed scope. Passkeys, static codes, email,
+SMS, Duo, user attributes/state and existing sessions are never reset or revoked.
 
-**Permission visibility limitation:** `admin/all` returns only devices the service
-can view and silently omits others. A complete cross-factor freshness check requires
-view coverage of all target devices (including unscoped supported types). The bot
-cannot prove absent devices are not merely hidden. Object-scoped grants for newly
-enrolled devices may require administrator maintenance and deployment-version RBAC
-verification; do not assume a user's reset permission grants device permissions.
-Use view coverage sufficient for the agreed snapshot guarantee, without granting
-unneeded delete permissions. No live service-account/RBAC qualification was done.
+**Verified re-enrollment gap is intentionally preserved:** the normal login flow
+has identification 10, password 20, MFA validation 30, login 100. Its validation
+accepts static/TOTP/WebAuthn/Duo/SMS and configures the existing TOTP setup stage
+only if no compatible factor remains (`not_configured_action=configure`, fresh
+validation threshold zero). Deleting the only TOTP factor can therefore force
+fresh TOTP setup, but a retained passkey can satisfy validation without TOTP setup.
+The passwordless flow performs WebAuthn validation at 10 and login at 20, with no
+TOTP guard. Existing sessions are not explicitly revoked. the operator has been told
+this limitation; the source update preserves that behavior. No reset marker,
+`change_user` right, mandatory global TOTP requirement or unrelated login change
+is introduced. Selective re-enrollment design would need further exact approval.
 
-**Concurrency limitation:** Authentik's delete API has no snapshot conditional or
-transaction spanning the metadata read and delete. The bot rechecks immediately
-before each mutation and serializes its own target operations. Another administrator
-can still change Authentik after that final read. If strict server-atomic prevention
-of all concurrent external changes is required, activation must remain blocked
-pending server-side conditional support or an approved maintenance procedure.
+## Existing-credential deployment
 
-## Audit and failure handling
+Existing-credential reuse requires explicit operator approval, the configured service username and pinned positive user ID. Supply these installation-specific values privately; keep a separate credential unset in reuse mode. Reusing an active superuser retains its broad authority, and bot target checks cannot constrain a stolen credential. Native recovery never handles passwords.
 
-Enabled recovery requires an explicitly configured private regular file, mode
-0600, with a private parent directory and persistent bot-writable mount. Opening a
-symlink, nonregular file, or group/world-readable file fails. Each JSON-line event
-is synchronously appended and fsynced before proceeding. Any write/fsync failure
-latches the file audit closed until process restart. Setup failure stops startup;
-a runtime failure stops further recovery writes. Events contain UTC timestamp,
-action, Discord caller ID, numeric target ID (0 if unresolved), status, and optional
-confirmed deletion count. Statuses include startup, attempt, preview, confirm,
-write_attempt, success, denied, partial and cancelled. No names, email addresses,
-API bodies, API tokens, MFA material, device names, confirmation handles or links
-are logged. Disabled requests get a minimal structured denial in ordinary bot logs.
+## Optional separate credential and parent-owned Authentik settings
 
-If audit fails after an API success, the response preserves the acknowledged
-outcome and reports audit failure. The durable preceding `write_attempt` indicates
-an outcome requiring operator reconciliation. A failed/lost API response can have
-taken effect; never retry blindly. Audit file rotation/retention and disk monitoring
-are operator responsibilities; use controlled bot restart after rotation, since
-the process holds its file descriptor. Run one bot instance: pending state and
-cooldowns are in memory and reset on restart; replicas are not coordinated.
+Alternative default mode (not the approved deployment choice): active non-superuser `service_account`
+`authentik-discord-recovery`, with a separate API-intent token expiring in 90 days.
+Expected username is explicit configuration. The bot validates `/core/users/me/`
+and rejects unexpected name/type, inactive/superuser or impersonated identities
+before recovery activity. No silent legacy token fallback in this mode; legacy the operator superuser
+operations remain unchanged by instruction.
 
-## Mock verification
+Intended **global** permissions, without per-user/per-device grant maintenance:
 
-No `.env` is loaded in tests. Config loading moved from package `init` into
-`main`; production still fails before connecting when required legacy variables
-are missing. All new Authentik and Discord requests use in-memory transports in
-tests, without real credentials, DNS, network, email, or enrollments. Source
-inspection used official public files only. Checks:
+- `authentik_core.view_user`
+- `authentik_rbac.view_role`
+- `guardian.view_roleobjectpermission`
+- `authentik_stages_authenticator_totp.view_totpdevice`
+- `authentik_stages_authenticator_totp.delete_totpdevice`
+
+The global permission catalog endpoint is IsAuthenticated. Neither native email
+nor this bot requires reset-password, email-stage-view, user-write, group/role
+mutation, flow-edit, token-create or impersonation privileges. Global TOTP delete
+can affect administrators if the token or bot is compromised; application checks
+and their unavoidable external race do not narrow the server-side permission.
+No accounts, credentials, Vault values or grants are created/changed by this task.
+
+Configure and qualify native recovery-flow ordering, disabled-account behavior and email delivery for each installation. Source/mocks do not establish inbox delivery or safe concurrent account-state writes. Installation-specific flow and SMTP settings belong in private operational records.
+
+## Audit, verification and parent handoff
+
+Enabled recovery requires a private regular durable file, private parent directory
+and writable persistent mount. Symlinks, nonregular/public files or unavailable
+storage fail closed. Each structured JSONL event is appended and fsynced before
+proceeding; failures latch audit closed until restart. UTC timestamp, action,
+Discord caller ID, numeric target ID (0 if unresolved), status and acknowledged
+TOTP deletion count are recorded. Statuses cover startup/attempt/preview/confirm,
+write_attempt/success/denied/uncertain/partial/cancelled. No API body, target name/email,
+credential, cookie, MFA material, confirmation handle or recovery link is logged.
+Discord errors also omit raw errors to avoid webhook credential exposure.
+If audit fails after acknowledged success, the response preserves that outcome
+and reports audit failure; the preceding write_attempt requires reconciliation.
+Audit retention/rotation/disk monitoring remain operator responsibilities.
+
+Use cached modules only:
 
 ```sh
+gofmt -w recovery*.go
 GOCACHE=/tmp/authbot-go-cache GOPROXY=off GOSUMDB=off go test ./...
 GOCACHE=/tmp/authbot-go-cache GOPROXY=off GOSUMDB=off go test -race ./...
 GOCACHE=/tmp/authbot-go-cache GOPROXY=off GOSUMDB=off go vet ./...
+git diff --check
 ```
 
-The isolated writable cache is needed in this workspace; its default Go cache is
-read-only. Dependencies are already cached; `GOPROXY=off` forbids network downloads.
+Tests mock all Authentik/Discord requests in memory, including role/grant pages,
+native cookie/redirect state, future internal/external targets, collisions,
+promotion, expiry/replay, stale enrollments, partial failures and redaction.
+No test requires live credentials, network, recovery/login execution or real MFA.
 
-## Parent review and exact activation decisions
+Parent reviews/commits the patch, qualifies complete grant visibility (including
+the supplemental read), provisions credentials/settings and handles publication/build/deployment. Preserve all legacy
+config and commands. Use an approved immutable image digest, prevent Watchtower
+or other floating-tag autoactivation, and recreate only `authentik-bot` with
+`--no-deps --pull never`; do not run broad stack workflows. Keep recovery switches
+false until parent supplies the approved caller/guild/channel, dedicated token,
+pinned flow and audit mount. Parent owns all live qualification and any separately
+authorized test-account email/reset operation. None is authorized in this task.
 
-Before any publication, image pull, recreation, enablement or live test, obtain
-approval for the exact immutable image digest, deployment time, the operator's Discord
-user ID, guild ID, preserved channel ID, target username list, service-account
-name and permission scope, token creation/expiry, audit mount/retention, factor
-scope (proposed TOTP only), and each feature switch. Password email additionally
-requires an exact brand recovery-flow assignment, stage UUID, acknowledgement of
-the flow's MFA-validation behavior, and a separately approved email delivery test.
-MFA deletion tests require separate approval naming target and factor scope/count.
-Resolve the permission-visibility and external-concurrency limitations above.
+Rollback disables both switches, invalidates pending handles by a bot-only
+recreation, and if needed pins the recorded prior immutable bot digest with updater
+exclusion retained. This cannot undo a sent email or deleted enrollment. No
+password, permission, flow, token, enrollment or upstream-system rollback is
+attempted automatically. Reconciled source baseline is
+`05bd292403775047cd03744a9cd265b7afa99c5a` on
+`feature/recovery-commands-review`; parent reports production still on the original
+healthy image and handles any ordinary local Git approval. No Git escalation,
+remote publishing or deployment is attempted here.
 
-### Proposed rollout after approval (not executed)
+## Official source references
 
-1. Review the patch/local commit and run the mock checks. Publish/build only after
-   separate approval. Existing push/PR workflows run CI, and master/main/weekly
-   workflows can publish `latest`; do not use them as an implicit deployment path.
-   Record the resulting reviewed immutable GHCR digest and the current deployed
-   image digest for rollback; source baseline is
-   `d12cbf2626ab0d3dfc73100ff1d4d729f2065edc`.
-2. On `<deployment-host>`, prepare a bot-only Compose override with image
-   `ghcr.io/jacoknapp/authentikbot@sha256:<approved-digest>` and label
-   `com.centurylinklabs.watchtower.enable: "false"`. Preserve all existing env and
-   network settings. Persist that pin/label in both the authoritative source
-   `<private-deployment-path>` and live `<private-deployment-path>`
-   as separately reviewed changes, so normal stack maintenance cannot undo it.
-   Verify the actual updater respects that label and no other updater overrides
-   the pin. Prevent autoactivation before making an image available.
-3. Keep both recovery switches false for initial code rollout. With exact approval,
-   pull **only** the digest-pinned bot and recreate **only** `authentik-bot`, avoiding
-   broad docker deployment workflows. Commands below are templates, not executed:
-
-   ```sh
-   docker compose -f <private-deployment-path> -f <private-deployment-path> pull authentik-bot
-   docker compose -f <private-deployment-path> -f <private-deployment-path> up -d --no-deps --pull never --force-recreate authentik-bot
-   ```
-
-   The override must already contain the approved immutable digest and updater
-   exclusion. Record prior digest first; do not use floating `latest` or a broad
-   `compose pull/up`. Verify image digest, health, preserved existing commands and
-   absence of recovery registration. Do not dump container environment or render
-   Compose config containing secrets into logs.
-4. Separately approved service-account/role/token and optional brand-flow changes
-   are performed by an administrator. Review read-only identity/RBAC/prerequisite
-   evidence with redacted output. No permission broadening on denial. Place the
-   approved secret through the existing Vault-managed secret-handling process;
-   never in source, shell command lines, logs or a PR. `<private-deployment-path>`
-   is rendered by Vault Agent: `<private-deployment-path>` references
-   `templates/authbot.ctmpl`, which reads `<private-secret-storage-path>` and
-   currently emits only `DISCORD_TOKEN` and `AUTHENTIK_TOKEN`. Do not hand-edit
-   the rendered file. The approval must cover a new `RECOVERY_AUTHENTIK_TOKEN`
-   key in that existing KV record and conditional rendering of that key in the
-   template (or a separately reviewed new template/env_file). Preserve existing
-   values and do not print the secret. Non-secret recovery configuration belongs
-   in the reviewed bot service environment. No Vault, template, or production
-   Compose changes are included in this implementation.
-5. Prepare the agreed private audit mount/file, write only the exact approved IDs,
-   allowlist, factors and switches into the service config, and perform another
-   explicitly approved **bot-only** recreation with the same pinned digest.
-   First verify unauthorized guild/channel/caller and stale-button denials without
-   approving an action. Preview/Cancel can read enrollment metadata; live Confirm
-   tests are separate, specifically authorized actions. Confirm is never an
-   activation approval.
-
-### Proposed rollback after approval (not executed)
-
-Set both recovery switches false and recreate only the bot using the same scoped
-command above; this consumes no Authentik recovery action and invalidates pending
-confirmations. For binary rollback, replace the override's immutable image with
-its recorded pre-change digest, keep updater exclusion and recovery switches false,
-then pull only that exact bot digest if absent and recreate only the bot with
-`--no-deps --pull never`. Do not restore a floating tag. Verify old commands/health
-and keep audit records. Rolling back the bot cannot undo sent email, an already
-queued recovery token, or deleted MFA enrollments. Do not automatically restore
-roles, alter flows, generate links, resend email or reset upstream Duo.
+- [Executor protocol](https://api.goauthentik.io/flow-executor/)
+- [2026.8.5 executor](https://github.com/goauthentik/authentik/blob/version/2026.8.5/authentik/flows/views/executor.py),
+  [identification matching](https://github.com/goauthentik/authentik/blob/version/2026.8.5/authentik/stages/identification/stage.py),
+  [native email stage](https://github.com/goauthentik/authentik/blob/version/2026.8.5/authentik/stages/email/stage.py)
+- [Effective inherited roles](https://github.com/goauthentik/authentik/blob/version/2026.8.5/authentik/rbac/api/roles.py),
+  [global catalog and its app filter](https://github.com/goauthentik/authentik/blob/version/2026.8.5/authentik/rbac/api/rbac.py),
+  [object grants](https://github.com/goauthentik/authentik/blob/version/2026.8.5/authentik/rbac/api/rbac_roles.py),
+  [complete nested assignment serializer and model/object role filter](https://github.com/goauthentik/authentik/blob/version/2026.8.5/authentik/rbac/api/rbac_assigned_by_roles.py)
+- [Metadata-only enrollment enumeration](https://github.com/goauthentik/authentik/blob/version/2026.8.5/authentik/core/api/devices.py),
+  [TOTP admin delete](https://github.com/goauthentik/authentik/blob/version/2026.8.5/authentik/stages/authenticator_totp/api.py),
+  [pagination](https://github.com/goauthentik/authentik/blob/version/2026.8.5/authentik/api/pagination.py)

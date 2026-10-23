@@ -575,13 +575,35 @@ Potential improvements:
 
 ## Optional recovery commands
 
-`/password-reset-email username:<exact username>` and `/mfa-reset username:<exact username>`
-are disabled and unregistered by default. Both require a separate non-superuser
-service credential, explicit Discord caller and target allowlists, a guild and the
-existing exact command channel, durable audit storage, and a two-minute ephemeral
-Confirm/Cancel preview. Default MFA scope is TOTP only.
+`/password-reset-email username:<exact username>` initiates Authentik's native
+anonymous email-link recovery and stops at the email challenge. `/mfa-reset
+username:<exact username>` deletes only the previewed TOTP enrollments. Both are
+disabled and unregistered by default.
 
-Read [RECOVERY.md](RECOVERY.md) for every proposed environment variable, least
-privilege prerequisites, limitations, and approval-gated deployment/rollback.
-Existing `/invite`, `/group list/add/remove`, and `/user list` remain available.
-The recovery credential never replaces or falls back to the legacy credential.
+Recovery requires an explicitly selected credential mode, explicit Discord
+caller IDs, an exact guild and the existing command channel, private durable
+audit storage, and an expiring Confirm/Cancel preview. Targets are current or
+future active ordinary internal/external human accounts. Effective inherited
+roles and global/object grants are checked dynamically; administrators, system
+accounts, service accounts and immutable users are protected. No fixed target
+allowlist or per-user/device grant scheme is used. Roles whose complete grants
+cannot be established fail closed. Explicit existing-superuser mode can prove
+truly empty roles through complete permission references.
+
+Native email initiation uses no Bearer credential, password-change permission,
+email-stage-view permission, or default-brand recovery assignment. The exact
+configured `RECOVERY_FLOW_SLUG` is pinned. TOTP deletion preserves passkeys and
+other factors, passwordless login, and existing sessions. Retained passkeys may
+satisfy login without forcing fresh TOTP setup.
+
+Read [RECOVERY.md](RECOVERY.md) for configuration, least privilege, metadata and
+external-race limitations, mock checks, and parent-owned deployment/rollback.
+Existing `/invite`, `/group list/add/remove`, and `/user list` keep their legacy
+credential and behavior. Recovery never invokes their API/error helpers.
+
+Recovery credential modes: by default a separate non-superuser service account
+is required. Explicit `RECOVERY_USE_EXISTING_AUTHENTIK_TOKEN=true` instead reuses
+the bot's existing credential and requires a pinned active internal superuser
+username and `RECOVERY_EXPECTED_USER_ID`. This retains its existing broad powers;
+admin exclusions are enforced by bot logic. Native email stays anonymous in both
+modes. See [the recovery configuration](RECOVERY.md).

@@ -19,15 +19,15 @@ func recoveryCommands() []*discordgo.ApplicationCommand {
 		name, description string
 		enabled           bool
 	}{
-		{emailAction, "Preview a password recovery EMAIL to an allowed exact username", recovery.cfg.EmailEnabled},
-		{mfaAction, "Preview removal of configured Authentik MFA enrollments for one user", recovery.cfg.MFAEnabled},
+		{emailAction, "Preview native recovery email for one eligible exact username", recovery.cfg.EmailEnabled},
+		{mfaAction, "Preview removal of Authentik TOTP enrollments for one eligible user", recovery.cfg.MFAEnabled},
 	} {
 		if !entry.enabled {
 			continue
 		}
 		permissions := int64(0)
 		contexts := []discordgo.InteractionContextType{discordgo.InteractionContextGuild}
-		commands = append(commands, &discordgo.ApplicationCommand{Name: entry.name, Description: entry.description, DefaultMemberPermissions: &permissions, Contexts: &contexts, Options: []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionString, Name: "username", Description: "Exact allowlisted Authentik username", Required: true}}})
+		commands = append(commands, &discordgo.ApplicationCommand{Name: entry.name, Description: entry.description, DefaultMemberPermissions: &permissions, Contexts: &contexts, Options: []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionString, Name: "username", Description: "Exact Authentik username; ordinary human accounts only", Required: true}}})
 	}
 	return commands
 }
@@ -51,7 +51,7 @@ func recoveryCaller(i *discordgo.InteractionCreate) recoveryContext {
 func (r *recoveryService) previewMessage(p recoveryPending) string {
 	target := fmt.Sprintf("%s (user ID %d)", p.User.Username, p.User.PK)
 	if p.Action == emailAction {
-		return fmt.Sprintf("Confirm password recovery EMAIL for %s? Authentik will queue email to the existing address. Delivery is not guaranteed. Expires in two minutes.", target)
+		return fmt.Sprintf("Confirm password recovery EMAIL for %s? Authentik will initiate native recovery using the existing email address. Delivery is not guaranteed. Expires in two minutes.", target)
 	}
 	counts := map[string]int{}
 	for _, d := range p.Devices {
@@ -62,7 +62,7 @@ func (r *recoveryService) previewMessage(p recoveryPending) string {
 	for _, k := range r.cfg.Factors {
 		scope = append(scope, fmt.Sprintf("%s=%d", k, counts[k]))
 	}
-	return fmt.Sprintf("Confirm removal of %d Authentik enrollment(s) for %s? Exact scope: %s. Only the previewed device IDs will be deleted. Mandatory MFA policies still apply. Duo upstream is unchanged. Expires in two minutes.", len(p.Devices), target, strings.Join(scope, ", "))
+	return fmt.Sprintf("Confirm removal of %d Authentik TOTP enrollment(s) for %s? Exact scope: %s. Only the previewed device IDs will be deleted. Other factors and existing sessions remain. A retained passkey may allow login without TOTP setup. Expires in two minutes.", len(p.Devices), target, strings.Join(scope, ", "))
 }
 func handleRecoveryInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	// Always acknowledge ephemerally before HTTP work. Never log Discord errors:

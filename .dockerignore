@@ -1,0 +1,7 @@
+.git
+.env
+.env.*
+*.patch
+*.test
+authentik-bot
+recovery.jsonl

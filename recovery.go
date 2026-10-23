@@ -9,13 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 const recoveryTTL = 2 * time.Minute
@@ -25,14 +23,17 @@ const emailAction = "password-reset-email"
 const mfaAction = "mfa-reset"
 
 var recovery *recoveryService
+var recoveryFlowSlug = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,100}$`)
 var discordID = regexp.MustCompile(`^[0-9]{1,20}$`)
-var supportedFactors = map[string]bool{"totp": true, "webauthn": true, "static": true, "email": true, "sms": true, "duo": true}
+var recoveryTOTPDeletePath = regexp.MustCompile(`^/api/v3/authenticators/admin/totp/[1-9][0-9]*/$`)
+var supportedFactors = map[string]bool{"totp": true}
 
 type recoveryConfig struct {
-	EmailEnabled, MFAEnabled                                            bool
-	Token, ServiceUsername, Guild, Channel, EmailStage, Flow, AuditPath string
-	Callers, Targets, Immutable                                         map[string]bool
-	Factors                                                             []string
+	EmailEnabled, MFAEnabled, UseExistingToken              bool
+	Token, ServiceUsername, Guild, Channel, Flow, AuditPath string
+	Callers, Immutable                                      map[string]bool
+	Factors                                                 []string
+	ExpectedUserID                                          int64
 }
 
 func recoveryCSV(s string) map[string]bool {
@@ -46,7 +47,7 @@ func recoveryCSV(s string) map[string]bool {
 	return m
 }
 func readRecoveryConfig(legacy Config, env func(string) string) (recoveryConfig, error) {
-	c := recoveryConfig{Channel: legacy.CommandChannelID, EmailStage: env("RECOVERY_EMAIL_STAGE_UUID"), Factors: []string{"totp"}}
+	c := recoveryConfig{Channel: legacy.CommandChannelID, Factors: []string{"totp"}}
 	for key, dst := range map[string]*bool{"RECOVERY_EMAIL_ENABLED": &c.EmailEnabled, "RECOVERY_MFA_ENABLED": &c.MFAEnabled} {
 		switch env(key) {
 		case "", "false":
@@ -56,16 +57,32 @@ func readRecoveryConfig(legacy Config, env func(string) string) (recoveryConfig,
 			return c, errors.New("Recovery switches must be true or false")
 		}
 	}
-	if c.EmailStage == "" {
-		c.EmailStage = "5780da44-a43d-4791-b14e-e880cc8aa895"
+	switch env("RECOVERY_USE_EXISTING_AUTHENTIK_TOKEN") {
+	case "", "false":
+	case "true":
+		c.UseExistingToken = true
+	default:
+		return c, errors.New("Recovery existing credential switch must be true or false")
 	}
 	c.Token = env("RECOVERY_AUTHENTIK_TOKEN")
+	if c.UseExistingToken {
+		if c.Token != "" {
+			return c, errors.New("Existing and separate recovery credentials cannot be combined")
+		}
+		c.Token = legacy.AuthentikToken
+	}
+	if raw := env("RECOVERY_EXPECTED_USER_ID"); raw != "" {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || id <= 0 || strconv.FormatInt(id, 10) != raw {
+			return c, errors.New("Invalid recovery expected user ID")
+		}
+		c.ExpectedUserID = id
+	}
 	c.ServiceUsername = env("RECOVERY_SERVICE_USERNAME")
 	c.Guild = env("RECOVERY_GUILD_ID")
 	c.Flow = env("RECOVERY_FLOW_SLUG")
 	c.AuditPath = env("RECOVERY_AUDIT_PATH")
 	c.Callers = recoveryCSV(env("RECOVERY_DISCORD_USER_IDS"))
-	c.Targets = recoveryCSV(env("RECOVERY_TARGET_USERNAMES"))
 	c.Immutable = map[string]bool{}
 	for _, v := range legacy.ImmutableUsernames {
 		c.Immutable[strings.ToLower(strings.TrimSpace(v))] = true
@@ -79,28 +96,23 @@ func readRecoveryConfig(legacy Config, env func(string) string) (recoveryConfig,
 			}
 			c.Factors = append(c.Factors, k)
 		}
-		sort.Strings(c.Factors)
 	}
 	if !c.EmailEnabled && !c.MFAEnabled {
 		return c, nil
 	}
-	if c.Token == "" || strings.TrimSpace(c.Token) == strings.TrimSpace(legacy.AuthentikToken) || strings.TrimSpace(c.ServiceUsername) == "" || !discordID.MatchString(c.Guild) || !discordID.MatchString(c.Channel) || len(c.Callers) == 0 || len(c.Callers) > 128 || len(c.Targets) == 0 || len(c.Targets) > 128 || !filepath.IsAbs(c.AuditPath) || len(c.Factors) == 0 {
+	if c.Token == "" || (!c.UseExistingToken && strings.TrimSpace(c.Token) == strings.TrimSpace(legacy.AuthentikToken)) || strings.TrimSpace(c.ServiceUsername) == "" || !discordID.MatchString(c.Guild) || !discordID.MatchString(c.Channel) || len(c.Callers) == 0 || len(c.Callers) > 128 || !filepath.IsAbs(c.AuditPath) || len(c.Factors) == 0 {
 		return c, errors.New("Required recovery authorization configuration missing")
+	}
+	if c.UseExistingToken && c.ExpectedUserID <= 0 {
+		return c, errors.New("Existing recovery credential requires pinned user ID")
 	}
 	for id := range c.Callers {
 		if !discordID.MatchString(id) {
 			return c, errors.New("Invalid recovery caller ID")
 		}
 	}
-	for name := range c.Targets {
-		if !validRecoveryName(name) || c.Immutable[strings.ToLower(name)] || name == c.ServiceUsername {
-			return c, errors.New("Invalid or protected recovery target")
-		}
-	}
-	if c.EmailEnabled {
-		if _, err := uuid.Parse(c.EmailStage); err != nil || strings.TrimSpace(c.Flow) == "" {
-			return c, errors.New("Recovery email stage UUID and flow slug required")
-		}
+	if c.EmailEnabled && !recoveryFlowSlug.MatchString(c.Flow) {
+		return c, errors.New("Explicit valid native recovery flow slug required")
 	}
 	return c, nil
 }
@@ -171,13 +183,14 @@ func (a *fileRecoveryAudit) Write(e recoveryAuditEvent) error {
 func (a *fileRecoveryAudit) Close() error { return a.f.Close() }
 
 type recoveryPending struct {
-	Snapshot  []recoveryDevice
-	Context   recoveryContext
-	Action    string
-	User      recoveryUser
-	Devices   []recoveryDevice
-	Expires   time.Time
-	ServiceID int64
+	Snapshot    []recoveryDevice
+	Context     recoveryContext
+	Action      string
+	User        recoveryUser
+	Devices     []recoveryDevice
+	Expires     time.Time
+	ServiceID   int64
+	Permissions string
 }
 type recoveryGate struct {
 	Until time.Time
@@ -216,7 +229,7 @@ func newRecoveryService(c recoveryConfig, a *recoveryAPI, audit recoveryAudit) *
 	return &recoveryService{cfg: c, api: a, audit: audit, now: time.Now, pending: map[string]recoveryPending{}, gates: map[string]recoveryGate{}, callers: map[string]time.Time{}}
 }
 func (r *recoveryService) allowed(c recoveryContext, action string) bool {
-	return r != nil && r.audit != nil && ((action == emailAction && r.cfg.EmailEnabled) || (action == mfaAction && r.cfg.MFAEnabled)) && c.Caller != "" && r.cfg.Callers[c.Caller] && r.cfg.Guild != "" && c.Guild == r.cfg.Guild && r.cfg.Channel != "" && c.Channel == r.cfg.Channel
+	return r != nil && r.audit != nil && len(r.cfg.Factors) == 1 && r.cfg.Factors[0] == "totp" && ((action == emailAction && r.cfg.EmailEnabled) || (action == mfaAction && r.cfg.MFAEnabled)) && c.Caller != "" && r.cfg.Callers[c.Caller] && r.cfg.Guild != "" && c.Guild == r.cfg.Guild && r.cfg.Channel != "" && c.Channel == r.cfg.Channel
 }
 func (r *recoveryService) record(c recoveryContext, action string, target int64, status string, deleted int) error {
 	if r.audit == nil {
@@ -225,21 +238,39 @@ func (r *recoveryService) record(c recoveryContext, action string, target int64,
 	return r.audit.Write(recoveryAuditEvent{Timestamp: r.now().UTC().Format(time.RFC3339Nano), Action: action, Caller: c.Caller, Target: target, Status: status, Deleted: deleted})
 }
 func (r *recoveryService) eligible(u recoveryUser, serviceID int64) bool {
-	return u.ordinary() && r.cfg.Targets[u.Username] && !r.cfg.Immutable[strings.ToLower(u.Username)] && u.PK != serviceID && u.Username != r.cfg.ServiceUsername
+	return u.ordinary() && !r.cfg.Immutable[strings.ToLower(u.Username)] && u.PK != serviceID && u.Username != r.cfg.ServiceUsername
 }
-func (r *recoveryService) validate(name string) (recoveryUser, int64, error) {
-	id, err := r.api.identity(r.cfg.ServiceUsername)
+func (r *recoveryService) validate(name string) (recoveryUser, int64, string, error) {
+	id, err := r.api.identity(r.cfg.ServiceUsername, r.cfg.UseExistingToken, r.cfg.ExpectedUserID)
 	if err != nil {
-		return recoveryUser{}, 0, err
+		return recoveryUser{}, 0, "", err
 	}
 	u, err := r.api.exactUser(name)
 	if err != nil {
-		return u, 0, err
+		return u, 0, "", err
 	}
 	if !r.eligible(u, id) {
-		return u, 0, errors.New("Recovery target is protected or ineligible")
+		return u, 0, "", errors.New("Recovery target is protected or ineligible")
 	}
-	return u, id, nil
+	fingerprint, err := r.api.ordinaryPermissions(u.PK, r.cfg.UseExistingToken)
+	if err != nil {
+		return u, 0, "", err
+	}
+	fresh, err := r.api.exactUser(name)
+	if err != nil {
+		return fresh, 0, "", err
+	}
+	if !r.eligible(fresh, id) || !u.same(fresh) {
+		return fresh, 0, "", errors.New("Target changed during eligibility scan")
+	}
+	currentID, err := r.api.identity(r.cfg.ServiceUsername, r.cfg.UseExistingToken, r.cfg.ExpectedUserID)
+	if err != nil {
+		return fresh, 0, "", err
+	}
+	if currentID != id {
+		return fresh, 0, "", errors.New("Credential identity changed during eligibility scan")
+	}
+	return fresh, id, fingerprint, nil
 }
 func (r *recoveryService) reserve(c recoveryContext, name string) error {
 	r.mu.Lock()
@@ -289,7 +320,7 @@ func (r *recoveryService) preview(c recoveryContext, action, name string) (strin
 		}
 		return "", p, err
 	}
-	if !r.allowed(c, action) || !validRecoveryName(name) || !r.cfg.Targets[name] {
+	if !r.allowed(c, action) || !validRecoveryName(name) {
 		return deny(errors.New("Recovery disabled or unauthorized"))
 	}
 	if err := r.reserve(c, name); err != nil {
@@ -301,15 +332,16 @@ func (r *recoveryService) preview(c recoveryContext, action, name string) (strin
 			r.release(name)
 		}
 	}()
-	u, id, err := r.validate(name)
+	u, id, permissions, err := r.validate(name)
 	p.User = u
 	if err != nil {
 		return deny(err)
 	}
 	p.User = u
 	p.ServiceID = id
+	p.Permissions = permissions
 	if action == emailAction {
-		err = r.api.emailReady(r.cfg.Flow, r.cfg.EmailStage, u)
+		err = r.api.uniqueNativeIdentifier(u)
 	} else {
 		p.Snapshot, err = r.api.devices(u.PK)
 		for _, d := range p.Snapshot {
@@ -378,8 +410,12 @@ func (r *recoveryService) confirm(c recoveryContext, id string, cancel bool) (st
 		return "Recovery cancelled; no changes requested.", r.record(c, p.Action, p.User.PK, "cancelled", 0)
 	}
 	done := 0
+	attempted := false
 	fail := func(e error) (string, error) {
 		status := "denied"
+		if attempted {
+			status = "uncertain"
+		}
 		if done > 0 {
 			status = "partial"
 		}
@@ -401,14 +437,14 @@ func (r *recoveryService) confirm(c recoveryContext, id string, cancel bool) (st
 		if !r.allowed(c, p.Action) {
 			return errors.New("Recovery disabled or unauthorized")
 		}
-		u, id, e := r.validate(p.User.Username)
+		u, id, permissions, e := r.validate(p.User.Username)
 		if e != nil {
 			return e
 		}
 		if !r.now().Before(p.Expires) {
 			return errors.New("Confirmation expired during revalidation")
 		}
-		if id != p.ServiceID || !p.User.same(u) {
+		if id != p.ServiceID || !p.User.same(u) || permissions != p.Permissions {
 			return errors.New("Target or credential identity changed; request a fresh preview")
 		}
 		return nil
@@ -417,20 +453,31 @@ func (r *recoveryService) confirm(c recoveryContext, id string, cancel bool) (st
 		return fail(err)
 	}
 	if p.Action == emailAction {
-		if err = r.api.emailReady(r.cfg.Flow, r.cfg.EmailStage, p.User); err != nil {
+		if err = r.api.uniqueNativeIdentifier(p.User); err != nil {
 			return fail(err)
 		}
-		if err = check(); err != nil {
-			return fail(err)
-		}
-		if err = r.record(c, p.Action, p.User.PK, "write_attempt", 0); err != nil {
-			return fail(err)
-		}
-		err = r.api.request("POST", fmt.Sprintf("/api/v3/core/users/%d/recovery_email/", p.User.PK), nil, map[string]string{"email_stage": r.cfg.EmailStage}, nil)
+		// Fresh anonymous session; preview performs no flow request. Every request
+		// capable of advancing to email rechecks eligibility and audit before sending.
+		err = r.api.nativeRecovery(r.cfg.Flow, p.User.Username, func() error {
+			if e := r.api.uniqueNativeIdentifier(p.User); e != nil {
+				return e
+			}
+			if e := check(); e != nil {
+				return e
+			}
+			if !r.now().Before(p.Expires) {
+				return errors.New("Confirmation expired during revalidation")
+			}
+			if e := r.record(c, p.Action, p.User.PK, "write_attempt", 0); e != nil {
+				return e
+			}
+			attempted = true
+			return nil
+		})
 		if err != nil {
 			return fail(err)
 		}
-		msg := "Password recovery email accepted as queued; delivery is not guaranteed."
+		msg := "Native recovery request submitted; inbox delivery is not guaranteed."
 		if err = r.record(c, p.Action, p.User.PK, "success", 0); err != nil {
 			return msg, err
 		}
@@ -456,7 +503,11 @@ func (r *recoveryService) confirm(c recoveryContext, id string, cancel bool) (st
 			return fail(err)
 		}
 		d := remaining[0]
-		if err = r.api.request("DELETE", fmt.Sprintf("%s%s/", factorPath(d.Kind), d.PK), nil, nil, nil); err != nil {
+		if d.Kind != "totp" {
+			return fail(errors.New("Only confirmed TOTP scope is supported"))
+		}
+		attempted = true
+		if err = r.api.request("DELETE", fmt.Sprintf("/api/v3/authenticators/admin/totp/%s/", d.PK), nil, nil, nil); err != nil {
 			return fail(err)
 		}
 		done++
@@ -468,7 +519,7 @@ func (r *recoveryService) confirm(c recoveryContext, id string, cancel bool) (st
 		}
 		remaining = remaining[1:]
 	}
-	msg := fmt.Sprintf("Deleted %d Authentik enrollments in scope %s. Mandatory MFA policies still apply; Duo upstream is unchanged.", done, strings.Join(r.cfg.Factors, ", "))
+	msg := fmt.Sprintf("Deleted %d Authentik TOTP enrollments. Other factors and existing sessions remain. Login may allow a retained passkey without TOTP setup.", done)
 	if err = r.record(c, p.Action, p.User.PK, "success", done); err != nil {
 		return msg, err
 	}

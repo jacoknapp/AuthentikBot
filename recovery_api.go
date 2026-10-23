@@ -17,22 +17,25 @@ import (
 var errRecoveryAPI = errors.New("Recovery API request failed; no automatic retry. An interrupted write may have taken effect; operator review is required.")
 
 type recoveryUser struct {
-	PK       int64  `json:"pk"`
-	Username string `json:"username"`
-	Email    string `json:"email"`
-	Active   *bool  `json:"is_active"`
-	Super    *bool  `json:"is_superuser"`
-	Type     string `json:"type"`
-	UUID     string `json:"uuid"`
-	Updated  string `json:"last_updated"`
+	PK       int64   `json:"pk"`
+	Username string  `json:"username"`
+	Email    *string `json:"email"`
+	Path     *string `json:"path"`
+	Active   *bool   `json:"is_active"`
+	Super    *bool   `json:"is_superuser"`
+	Type     string  `json:"type"`
+	UUID     string  `json:"uuid"`
+	Updated  string  `json:"last_updated"`
 }
 
 // bool pointers ensure omitted security fields fail closed.
 func (u recoveryUser) ordinary() bool {
-	return u.PK > 0 && u.Active != nil && *u.Active && u.Super != nil && !*u.Super && u.Type == "internal" && u.UUID != "" && u.Updated != ""
+	return u.PK > 0 && u.Active != nil && *u.Active && u.Super != nil && !*u.Super &&
+		(u.Type == "internal" || u.Type == "external") && validRecoveryUUID(u.UUID) && u.Updated != "" &&
+		u.Email != nil && u.Path != nil && !systemRecoveryUser(u)
 }
 func (u recoveryUser) same(v recoveryUser) bool {
-	return u.PK == v.PK && u.Username == v.Username && u.UUID == v.UUID && u.Email == v.Email && u.Updated == v.Updated && u.ordinary() && v.ordinary()
+	return u.PK == v.PK && u.Username == v.Username && u.Type == v.Type && u.UUID == v.UUID && u.Email != nil && v.Email != nil && *u.Email == *v.Email && u.Path != nil && v.Path != nil && *u.Path == *v.Path && u.Updated == v.Updated && u.ordinary() && v.ordinary()
 }
 
 type recoveryAPI struct {
@@ -52,6 +55,9 @@ func newRecoveryAPI(base, token string) (*recoveryAPI, error) {
 
 // Paths are constructed internally; pagination never follows server-supplied URLs.
 func (a *recoveryAPI) request(method, path string, q url.Values, body, out any) error {
+	if method != "GET" && (method != "DELETE" || !recoveryTOTPDeletePath.MatchString(path) || body != nil || len(q) != 0) {
+		return errRecoveryAPI
+	}
 	if !strings.HasPrefix(path, "/api/v3/") || strings.ContainsAny(path, "?#%\\") || strings.Contains(path, "..") {
 		return errRecoveryAPI
 	}
@@ -100,10 +106,10 @@ func (a *recoveryAPI) request(method, path string, q url.Values, body, out any) 
 type recoveryPage[T any] struct {
 	Results    []T `json:"results"`
 	Pagination *struct {
-		Next    int `json:"next"`
-		Current int `json:"current"`
-		Total   int `json:"total_pages"`
-		Count   int `json:"count"`
+		Next    *int `json:"next"`
+		Current *int `json:"current"`
+		Total   *int `json:"total_pages"`
+		Count   *int `json:"count"`
 	} `json:"pagination"`
 }
 
@@ -112,31 +118,41 @@ func recoveryList[T any](a *recoveryAPI, path string, q url.Values) ([]T, error)
 		q = url.Values{}
 	}
 	all := []T{}
+	expectedCount, expectedTotal := -1, -1
 	for page := 1; page <= 100; page++ {
 		q.Set("page", strconv.Itoa(page))
-		q.Set("page_size", "100")
+		if q.Get("page_size") == "" {
+			q.Set("page_size", "100")
+		}
 		var data recoveryPage[T]
 		if err := a.request("GET", path, q, nil, &data); err != nil {
 			return nil, err
 		}
 		p := data.Pagination
-		if data.Results == nil || p == nil || p.Current != page || p.Total < page || p.Total > 100 || p.Count < 0 {
+		if data.Results == nil || p == nil || p.Next == nil || p.Current == nil || p.Total == nil || p.Count == nil || *p.Current != page || *p.Total < page || *p.Total > 100 || *p.Count < 0 || *p.Count > 10000 {
+			return nil, errRecoveryAPI
+		}
+		if expectedCount < 0 {
+			expectedCount = *p.Count
+			expectedTotal = *p.Total
+		}
+		if *p.Count != expectedCount || *p.Total != expectedTotal || len(all)+len(data.Results) > 10000 {
 			return nil, errRecoveryAPI
 		}
 		all = append(all, data.Results...)
-		if p.Next == 0 {
-			if p.Total != page || p.Count != len(all) {
+		if *p.Next == 0 {
+			if *p.Total != page || *p.Count != len(all) {
 				return nil, errRecoveryAPI
 			}
 			return all, nil
 		}
-		if p.Next != page+1 || p.Next > p.Total {
+		if *p.Next != page+1 || *p.Next > *p.Total {
 			return nil, errRecoveryAPI
 		}
 	}
 	return nil, errRecoveryAPI
 }
-func (a *recoveryAPI) identity(expected string) (int64, error) {
+func (a *recoveryAPI) identity(expected string, existing bool, expectedID int64) (int64, error) {
 	var data struct {
 		User     recoveryUser    `json:"user"`
 		Original json.RawMessage `json:"original"`
@@ -145,7 +161,7 @@ func (a *recoveryAPI) identity(expected string) (int64, error) {
 		return 0, err
 	}
 	u := data.User
-	if u.PK <= 0 || u.Username != expected || u.Active == nil || !*u.Active || u.Super == nil || *u.Super || u.Type != "service_account" || (len(data.Original) > 0 && string(data.Original) != "null") {
+	if u.PK <= 0 || u.Username != expected || u.Active == nil || !*u.Active || u.Super == nil || (!existing && (*u.Super || u.Type != "service_account")) || (existing && (!*u.Super || u.Type != "internal" || expectedID <= 0 || u.PK != expectedID)) || (len(data.Original) > 0 && string(data.Original) != "null") {
 		return 0, errors.New("Recovery credential identity rejected")
 	}
 	return u.PK, nil
@@ -167,30 +183,6 @@ func (a *recoveryAPI) exactUser(name string) (recoveryUser, error) {
 		return recoveryUser{}, errors.New("Target must resolve to exactly one exact username")
 	}
 	return found, nil
-}
-func (a *recoveryAPI) emailReady(flow, stage string, u recoveryUser) error {
-	if strings.TrimSpace(u.Email) == "" {
-		return errors.New("Target has no email address; nothing queued")
-	}
-	var brand struct {
-		Recovery string `json:"flow_recovery"`
-	}
-	if err := a.request("GET", "/api/v3/core/brands/current/", nil, nil, &brand); err != nil {
-		return err
-	}
-	if brand.Recovery == "" || brand.Recovery != flow {
-		return errors.New("Current brand recovery flow missing or differs from configured flow; nothing queued")
-	}
-	var emailStage struct {
-		PK string `json:"pk"`
-	}
-	if err := a.request("GET", "/api/v3/stages/email/"+stage+"/", nil, nil, &emailStage); err != nil {
-		return errors.New("Configured email stage unavailable or not viewable; nothing queued")
-	}
-	if emailStage.PK != stage {
-		return errors.New("Configured email stage missing; nothing queued")
-	}
-	return nil
 }
 
 // The generic admin/all endpoint is intentionally used for enumeration. In
@@ -217,7 +209,6 @@ var recoveryDeviceModels = map[string]string{
 	"authentik_stages_authenticator_duo.DuoDevice":           "duo",
 }
 
-func factorPath(kind string) string { return "/api/v3/authenticators/admin/" + kind + "/" }
 func (a *recoveryAPI) devices(pk int64) ([]recoveryDevice, error) {
 	var all []recoveryDevice
 	if err := a.request("GET", "/api/v3/authenticators/admin/all/", url.Values{"user": {strconv.FormatInt(pk, 10)}}, nil, &all); err != nil {

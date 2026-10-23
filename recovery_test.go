@@ -31,7 +31,7 @@ func mockResponse(code int, data any) *http.Response {
 }
 func flag(b bool) *bool { return &b }
 func ordinaryMock() recoveryUser {
-	return recoveryUser{PK: 42, Username: "alice", Email: "alice@example.invalid", Active: flag(true), Super: flag(false), Type: "internal", UUID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", Updated: "2026-10-22T00:00:00Z"}
+	return recoveryUser{PK: 42, Username: "alice", Email: stringPtr("alice@example.invalid"), Path: stringPtr("users"), Active: flag(true), Super: flag(false), Type: "internal", UUID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", Updated: "2026-10-22T00:00:00Z"}
 }
 func deviceMock(id, kind string) recoveryDevice {
 	model := ""
@@ -70,27 +70,35 @@ func (a *memoryAudit) statuses() []string {
 }
 
 type recoveryFixture struct {
-	t        *testing.T
-	r        *recoveryService
-	audit    *memoryAudit
-	ctx      recoveryContext
-	user     recoveryUser
-	service  recoveryUser
-	devices  []recoveryDevice
-	writes   []string
-	requests []string
-	hook     func(*http.Request) *http.Response
-	now      time.Time
+	t                       *testing.T
+	r                       *recoveryService
+	audit                   *memoryAudit
+	ctx                     recoveryContext
+	user                    recoveryUser
+	service                 recoveryUser
+	devices                 []recoveryDevice
+	writes                  []string
+	requests                []string
+	hook                    func(*http.Request) *http.Response
+	now                     time.Time
+	roles                   []recoveryRole
+	globals                 map[string][]recoveryPermission
+	objects                 map[string][]recoveryPermission
+	otherUsers              []recoveryUser
+	nativeGets, nativePosts int
 }
 
 func newRecoveryFixture(t *testing.T) *recoveryFixture {
 	f := &recoveryFixture{t: t, ctx: recoveryContext{Caller: "100", Channel: "200", Guild: "300"}, user: ordinaryMock(), service: recoveryUser{PK: 7, Username: "recovery-svc", Type: "service_account", Active: flag(true), Super: flag(false)}, devices: []recoveryDevice{deviceMock("1", "totp"), deviceMock("2", "totp")}, audit: &memoryAudit{}, now: time.Unix(10000, 0)}
+	f.roles = []recoveryRole{{PK: mockRoleID}}
+	f.globals = map[string][]recoveryPermission{mockRoleID: {ordinaryPermissionMock()}}
+	f.objects = map[string][]recoveryPermission{}
 	api, err := newRecoveryAPI("https://auth.example.invalid", "mock-recovery-credential")
 	if err != nil {
 		t.Fatal(err)
 	}
 	api.client.Transport = mockRoundTripper(f.roundTrip)
-	cfg := recoveryConfig{EmailEnabled: true, MFAEnabled: true, Token: "mock-recovery-credential", ServiceUsername: "recovery-svc", Guild: "300", Channel: "200", EmailStage: "5780da44-a43d-4791-b14e-e880cc8aa895", Flow: "approved-recovery", Callers: map[string]bool{"100": true, "101": true}, Targets: map[string]bool{"alice": true}, Immutable: map[string]bool{"jacob": true}, Factors: []string{"totp"}}
+	cfg := recoveryConfig{EmailEnabled: true, MFAEnabled: true, Token: "mock-recovery-credential", ServiceUsername: "recovery-svc", Guild: "300", Channel: "200", Flow: "approved-recovery", Callers: map[string]bool{"100": true, "101": true}, Immutable: map[string]bool{"jacob": true}, Factors: []string{"totp"}}
 	f.r = newRecoveryService(cfg, api, f.audit)
 	f.r.now = func() time.Time { return f.now }
 	return f
@@ -105,7 +113,7 @@ func (f *recoveryFixture) roundTrip(req *http.Request) (*http.Response, error) {
 	if req.Header.Get("User-Agent") != "Knapp-AuthentikBot-Recovery/1.0" {
 		f.t.Error("recovery User-Agent missing")
 	}
-	if req.Header.Get("Authorization") != "Bearer mock-recovery-credential" {
+	if !strings.Contains(req.URL.Path, "/flows/executor/") && req.Header.Get("Authorization") != "Bearer mock-recovery-credential" {
 		f.t.Error("recovery credential was not isolated")
 	}
 	f.requests = append(f.requests, req.Method+" "+req.URL.Path)
@@ -121,25 +129,85 @@ func (f *recoveryFixture) roundTrip(req *http.Request) (*http.Response, error) {
 	case "/api/v3/core/users/me/":
 		return mockResponse(200, map[string]any{"user": f.service}), nil
 	case "/api/v3/core/users/":
-		if req.URL.Query().Get("username") != "alice" {
-			f.t.Error("exact username filter missing")
+		items := []recoveryUser{f.user}
+		if name := req.URL.Query().Get("username"); name != "" {
+			if name != f.user.Username {
+				f.t.Error("exact username filter missing")
+			}
+		} else {
+			items = append(items, f.otherUsers...)
 		}
-		return mockResponse(200, pageMock([]recoveryUser{f.user}, 1, 0, 1, 1)), nil
-	case "/api/v3/stages/email/5780da44-a43d-4791-b14e-e880cc8aa895/":
-		return mockResponse(200, map[string]string{"pk": f.r.cfg.EmailStage}), nil
-	case "/api/v3/core/brands/current/":
-		return mockResponse(200, map[string]any{"flow_recovery": "approved-recovery"}), nil
+		return mockResponse(200, pageMock(items, 1, 0, 1, len(items))), nil
+	case "/api/v3/rbac/roles/":
+		if req.URL.Query().Get("users") != fmt.Sprint(f.user.PK) || req.URL.Query().Get("inherited") != "true" {
+			f.t.Error("effective inherited role filter missing")
+		}
+		return mockResponse(200, pageMock(f.roles, 1, 0, 1, len(f.roles))), nil
+	case "/api/v3/rbac/permissions/":
+		items := f.globals[req.URL.Query().Get("role")]
+		if items == nil {
+			items = []recoveryPermission{}
+		}
+		return mockResponse(200, pageMock(items, 1, 0, 1, len(items))), nil
+	case "/api/v3/rbac/permissions/assigned_by_roles/":
+		results := []recoveryRoleAssignments{}
+		for _, role := range f.roles {
+			global := f.globals[role.PK]
+			objects := f.objects[role.PK]
+			if global == nil {
+				global = []recoveryPermission{}
+			}
+			if objects == nil {
+				objects = []recoveryPermission{}
+			}
+			matches := false
+			for _, p := range global {
+				if p.App+"."+p.Model == req.URL.Query().Get("model") {
+					matches = true
+				}
+			}
+			for _, p := range objects {
+				if p.App+"."+p.Model == req.URL.Query().Get("model") && p.Object != nil && *p.Object == req.URL.Query().Get("object_pk") {
+					matches = true
+				}
+			}
+			if matches {
+				results = append(results, recoveryRoleAssignments{Role: role.PK, Global: global, Objects: objects})
+			}
+		}
+		return mockResponse(200, pageMock(results, 1, 0, 1, len(results))), nil
+	case "/api/v3/rbac/permissions/roles/":
+		if req.URL.Query().Get("page_size") != "10" {
+			f.t.Error("object grant pagination must be small")
+		}
+		items := f.objects[req.URL.Query().Get("uuid")]
+		if items == nil {
+			items = []recoveryPermission{}
+		}
+		return mockResponse(200, pageMock(items, 1, 0, 1, len(items))), nil
+	case "/api/v3/flows/executor/approved-recovery/":
+		if req.Header.Get("Authorization") != "" || req.URL.RawQuery != "query=" || req.Header.Get("Accept") != "application/json" {
+			f.t.Error("unsafe native headers/query")
+		}
+		if req.Method == "GET" {
+			f.nativeGets++
+			return mockResponse(200, identificationMock()), nil
+		}
+		if req.Method != "POST" {
+			f.t.Error("unexpected native method")
+		}
+		f.nativePosts++
+		var body map[string]string
+		if json.NewDecoder(req.Body).Decode(&body) != nil || !reflect.DeepEqual(body, map[string]string{"component": "ak-stage-identification", "uid_field": f.user.Username}) {
+			f.t.Error("unsafe native identification body")
+		}
+		return mockResponse(200, map[string]string{"component": "ak-stage-email"}), nil
 	case "/api/v3/authenticators/admin/all/":
-		if req.URL.Query().Get("user") != "42" {
+		if req.URL.Query().Get("user") != fmt.Sprint(f.user.PK) {
 			f.t.Error("exact target device filter missing")
 		}
 		return mockResponse(200, f.devices), nil
-	case "/api/v3/core/users/42/recovery_email/":
-		var body map[string]string
-		if json.NewDecoder(req.Body).Decode(&body) != nil || !reflect.DeepEqual(body, map[string]string{"email_stage": f.r.cfg.EmailStage}) {
-			f.t.Error("incorrect email route/body")
-		}
-		return mockResponse(204, nil), nil
+
 	}
 	if req.Method == "DELETE" {
 		for i, d := range f.devices {
@@ -154,7 +222,7 @@ func (f *recoveryFixture) roundTrip(req *http.Request) (*http.Response, error) {
 }
 func (f *recoveryFixture) preview(action string) string {
 	f.t.Helper()
-	id, _, err := f.r.preview(f.ctx, action, "alice")
+	id, _, err := f.r.preview(f.ctx, action, f.user.Username)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -162,7 +230,7 @@ func (f *recoveryFixture) preview(action string) string {
 }
 
 func TestRecoveryConfigFailClosed(t *testing.T) {
-	base := map[string]string{"RECOVERY_EMAIL_ENABLED": "true", "RECOVERY_MFA_ENABLED": "true", "RECOVERY_AUTHENTIK_TOKEN": "mock-separate", "RECOVERY_SERVICE_USERNAME": "recovery-svc", "RECOVERY_GUILD_ID": "300", "RECOVERY_DISCORD_USER_IDS": "100", "RECOVERY_TARGET_USERNAMES": "alice", "RECOVERY_FLOW_SLUG": "approved-recovery", "RECOVERY_AUDIT_PATH": "/tmp/proposed-audit"}
+	base := map[string]string{"RECOVERY_EMAIL_ENABLED": "true", "RECOVERY_MFA_ENABLED": "true", "RECOVERY_AUTHENTIK_TOKEN": "mock-separate", "RECOVERY_SERVICE_USERNAME": "recovery-svc", "RECOVERY_GUILD_ID": "300", "RECOVERY_DISCORD_USER_IDS": "100", "RECOVERY_FLOW_SLUG": "approved-recovery", "RECOVERY_AUDIT_PATH": "/tmp/proposed-audit"}
 	legacy := Config{AuthentikToken: "mock-legacy", CommandChannelID: "200", ImmutableUsernames: []string{"jacob"}}
 	cases := []struct {
 		name    string
@@ -178,7 +246,6 @@ func TestRecoveryConfigFailClosed(t *testing.T) {
 		{"token missing", func(m map[string]string, c *Config) { delete(m, "RECOVERY_AUTHENTIK_TOKEN") }, true},
 		{"legacy fallback forbidden", func(m map[string]string, c *Config) { m["RECOVERY_AUTHENTIK_TOKEN"] = c.AuthentikToken }, true},
 		{"no caller", func(m map[string]string, c *Config) { delete(m, "RECOVERY_DISCORD_USER_IDS") }, true},
-		{"no targets", func(m map[string]string, c *Config) { delete(m, "RECOVERY_TARGET_USERNAMES") }, true},
 		{"no channel", func(m map[string]string, c *Config) { c.CommandChannelID = "" }, true},
 		{"no guild", func(m map[string]string, c *Config) { delete(m, "RECOVERY_GUILD_ID") }, true},
 		{"no identity", func(m map[string]string, c *Config) { delete(m, "RECOVERY_SERVICE_USERNAME") }, true},
@@ -186,11 +253,9 @@ func TestRecoveryConfigFailClosed(t *testing.T) {
 		{"no audit", func(m map[string]string, c *Config) { delete(m, "RECOVERY_AUDIT_PATH") }, true},
 		{"relative audit", func(m map[string]string, c *Config) { m["RECOVERY_AUDIT_PATH"] = "audit.jsonl" }, true},
 		{"bad switch", func(m map[string]string, c *Config) { m["RECOVERY_MFA_ENABLED"] = "yes" }, true},
+		{"non-TOTP factor", func(m map[string]string, c *Config) { m["RECOVERY_MFA_FACTOR_TYPES"] = "webauthn" }, true},
+		{"bad slug", func(m map[string]string, c *Config) { m["RECOVERY_FLOW_SLUG"] = "../other?next=x" }, true},
 		{"unknown factor", func(m map[string]string, c *Config) { m["RECOVERY_MFA_FACTOR_TYPES"] = "totp,any" }, true},
-		{"wildcard", func(m map[string]string, c *Config) { m["RECOVERY_TARGET_USERNAMES"] = "*" }, true},
-		{"immutable", func(m map[string]string, c *Config) { m["RECOVERY_TARGET_USERNAMES"] = "JACOB" }, true},
-		{"self", func(m map[string]string, c *Config) { m["RECOVERY_TARGET_USERNAMES"] = "recovery-svc" }, true},
-		{"stage invalid", func(m map[string]string, c *Config) { m["RECOVERY_EMAIL_STAGE_UUID"] = "invalid" }, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -254,7 +319,6 @@ func TestRecoveryTargetsAndIdentity(t *testing.T) {
 		{"missing active", func(f *recoveryFixture) { f.user.Active = nil }},
 		{"superuser", func(f *recoveryFixture) { f.user.Super = flag(true) }},
 		{"missing superuser", func(f *recoveryFixture) { f.user.Super = nil }},
-		{"external", func(f *recoveryFixture) { f.user.Type = "external" }},
 		{"service target", func(f *recoveryFixture) { f.user.Type = "service_account" }},
 		{"internal service target", func(f *recoveryFixture) { f.user.Type = "internal_service_account" }},
 		{"immutable", func(f *recoveryFixture) { f.r.cfg.Immutable["alice"] = true }},
@@ -265,7 +329,8 @@ func TestRecoveryTargetsAndIdentity(t *testing.T) {
 		{"wrong identity", func(f *recoveryFixture) { f.service.Username = "other" }},
 		{"internal identity", func(f *recoveryFixture) { f.service.Type = "internal" }},
 		{"missing identity super", func(f *recoveryFixture) { f.service.Super = nil }},
-		{"not allowlisted", func(f *recoveryFixture) { f.r.cfg.Targets = nil }},
+		{"system path", func(f *recoveryFixture) { f.user.Path = stringPtr("goauthentik.io/system") }},
+		{"missing path", func(f *recoveryFixture) { f.user.Path = nil }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -327,49 +392,22 @@ func TestRecoveryConfirmationBindingsAndExpiry(t *testing.T) {
 func TestRecoveryEmailAndReplay(t *testing.T) {
 	f := newRecoveryFixture(t)
 	id := f.preview(emailAction)
-	if len(f.writes) != 0 {
-		t.Fatal("preview mutated")
+	if len(f.writes) != 0 || f.nativeGets != 0 {
+		t.Fatal("preview mutated or initiated native flow")
 	}
 	message, err := f.r.confirm(f.ctx, id, false)
-	if err != nil || !strings.Contains(message, "queued") {
+	if err != nil || !strings.Contains(message, "submitted") {
 		t.Fatalf("%s %v", message, err)
 	}
-	if !reflect.DeepEqual(f.writes, []string{"POST /api/v3/core/users/42/recovery_email/"}) {
+	if !reflect.DeepEqual(f.writes, []string{"POST /api/v3/flows/executor/approved-recovery/"}) {
 		t.Fatal(f.writes)
 	}
 	if _, err = f.r.confirm(f.ctx, id, false); err == nil || len(f.writes) != 1 {
 		t.Fatal("replay")
 	}
 }
-func TestRecoveryEmailPrerequisites(t *testing.T) {
-	for _, which := range []string{"email", "missing flow", "wrong flow"} {
-		t.Run(which, func(t *testing.T) {
-			f := newRecoveryFixture(t)
-			if which == "email" {
-				f.user.Email = ""
-			} else {
-				flow := ""
-				if which == "wrong flow" {
-					flow = "other"
-				}
-				f.hook = func(r *http.Request) *http.Response {
-					if strings.Contains(r.URL.Path, "brands") {
-						return mockResponse(200, map[string]string{"flow_recovery": flow})
-					}
-					return nil
-				}
-			}
-			if _, _, err := f.r.preview(f.ctx, emailAction, "alice"); err == nil {
-				t.Fatal("missing prerequisite accepted")
-			}
-			if len(f.writes) != 0 {
-				t.Fatal("mutated")
-			}
-		})
-	}
-}
 func TestRecoveryRevalidation(t *testing.T) {
-	for _, which := range []string{"target super", "target changed", "email changed", "service changed", "service super", "target removed", "flow changed"} {
+	for _, which := range []string{"target super", "target changed", "email changed", "service changed", "service super", "target now service"} {
 		t.Run(which, func(t *testing.T) {
 			f := newRecoveryFixture(t)
 			id := f.preview(emailAction)
@@ -379,20 +417,13 @@ func TestRecoveryRevalidation(t *testing.T) {
 			case "target changed":
 				f.user.UUID = "different"
 			case "email changed":
-				f.user.Email = "other@example.invalid"
+				f.user.Email = stringPtr("other@example.invalid")
 			case "service changed":
 				f.service.PK = 8
 			case "service super":
 				f.service.Super = flag(true)
-			case "target removed":
-				f.r.cfg.Targets = nil
-			case "flow changed":
-				f.hook = func(r *http.Request) *http.Response {
-					if strings.Contains(r.URL.Path, "brands") {
-						return mockResponse(200, map[string]any{"flow_recovery": nil})
-					}
-					return nil
-				}
+			case "target now service":
+				f.user.Type = "service_account"
 			}
 			if _, err := f.r.confirm(f.ctx, id, false); err == nil {
 				t.Fatal("change accepted")
@@ -787,41 +818,6 @@ func TestRecoveryStopsAfterChangesBetweenDeletes(t *testing.T) {
 		})
 	}
 }
-func TestRecoveryEmailStageDenialAndExpiryDuringRead(t *testing.T) {
-	for _, which := range []string{"missing stage", "wrong stage", "expires during read"} {
-		t.Run(which, func(t *testing.T) {
-			f := newRecoveryFixture(t)
-			if which != "expires during read" {
-				f.hook = func(r *http.Request) *http.Response {
-					if strings.Contains(r.URL.Path, "/stages/email/") {
-						if which == "missing stage" {
-							return mockResponse(403, map[string]string{"error": "MOCK_SENSITIVE"})
-						}
-						return mockResponse(200, map[string]string{"pk": "other"})
-					}
-					return nil
-				}
-				if _, _, err := f.r.preview(f.ctx, emailAction, "alice"); err == nil {
-					t.Fatal("stage accepted")
-				}
-			} else {
-				id := f.preview(emailAction)
-				f.hook = func(r *http.Request) *http.Response {
-					if r.URL.Path == "/api/v3/core/users/" {
-						f.now = f.now.Add(recoveryTTL)
-					}
-					return nil
-				}
-				if _, err := f.r.confirm(f.ctx, id, false); err == nil {
-					t.Fatal("expired during read accepted")
-				}
-			}
-			if len(f.writes) != 0 {
-				t.Fatal("unexpected mutation")
-			}
-		})
-	}
-}
 func TestRecoveryFailureOutcomeIsTruthful(t *testing.T) {
 	f := newRecoveryFixture(t)
 	id := f.preview(mfaAction)
@@ -846,7 +842,7 @@ func TestRecoveryFailureOutcomeIsTruthful(t *testing.T) {
 		return nil
 	}
 	msg, err = f.r.confirm(f.ctx, id, false)
-	if err == nil || len(f.writes) != 1 || !strings.Contains(msg, "queued") {
+	if err == nil || len(f.writes) != 1 || !strings.Contains(msg, "submitted") {
 		t.Fatal("acknowledged outcome lost on audit failure")
 	}
 }
@@ -892,3 +888,14 @@ func TestRecoveryAuditLatchesAndRejectsNonregular(t *testing.T) {
 		t.Fatal("relative path accepted")
 	}
 }
+
+const mockRoleID = "11111111-2222-3333-4444-555555555555"
+
+func ordinaryPermissionMock() recoveryPermission {
+	return recoveryPermission{ID: 1, App: "authentik_core", Model: "application", Code: "view_application"}
+}
+func identificationMock() map[string]any {
+	return map[string]any{"component": "ak-stage-identification", "password_fields": false, "user_fields": []string{"username", "email"}, "captcha_stage": nil, "passkey_challenge": nil, "flow_designation": "recovery"}
+}
+
+func factorPath(kind string) string { return "/api/v3/authenticators/admin/" + kind + "/" }
