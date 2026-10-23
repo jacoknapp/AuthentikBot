@@ -575,10 +575,11 @@ Potential improvements:
 
 ## Optional recovery commands
 
-`/authctl password reset user:<exact username>` initiates Authentik's native
-anonymous email-link recovery and stops at the email challenge. `/authctl mfa reset
+`/authctl password action:reset user:<exact username>` initiates Authentik's native
+anonymous email-link recovery and stops at the email challenge. `/authctl mfa action:reset
 user:<exact username>` deletes only the previewed TOTP enrollments. Both are
-disabled and unregistered by default.
+disabled and unregistered by default. The required `action` choice currently permits
+only `reset`.
 
 Recovery requires an explicitly selected credential mode, explicit Discord
 caller IDs, an exact guild and the existing command channel, private durable

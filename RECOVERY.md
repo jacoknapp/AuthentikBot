@@ -12,11 +12,13 @@ Discord transports run entirely in memory. Both features remain off by default.
 
 ## Commands and controls
 
-- `/authctl password reset user:<exact username>`: prevalidate a human account,
+- `/authctl password action:reset user:<exact username>`: prevalidate a human account,
   obtain an ephemeral confirmation, then initiate the configured native anonymous
   recovery flow with that username and stop at `ak-stage-email`.
-- `/authctl mfa reset user:<exact username>`: preview the exact TOTP enrollment count,
+- `/authctl mfa action:reset user:<exact username>`: preview the exact TOTP enrollment count,
   confirm, and delete only those TOTP IDs. Other enrollment types are preserved.
+
+`action` is a required choice field; `reset` is its only permitted value.
 
 Only configured explicit Discord callers in the exact configured guild and the
 existing exact `COMMAND_CHANNEL_ID` may preview, confirm, or cancel. DMs and missing
