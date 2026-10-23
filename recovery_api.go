@@ -3,6 +3,7 @@ package main
 // Recovery has its own HTTP client and never uses the legacy API helpers.
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"time"
 )
+
+var errRecoveryAccessDenied = errors.New("Recovery API access denied; no automatic retry")
 
 var errRecoveryAPI = errors.New("Recovery API request failed; no automatic retry. An interrupted write may have taken effect; operator review is required.")
 
@@ -39,6 +42,7 @@ func (u recoveryUser) same(v recoveryUser) bool {
 }
 
 type recoveryAPI struct {
+	ctx    context.Context
 	base   *url.URL
 	token  string
 	client *http.Client
@@ -70,7 +74,11 @@ func (a *recoveryAPI) request(method, path string, q url.Values, body, out any) 
 			return errRecoveryAPI
 		}
 	}
-	req, err := http.NewRequest(method, u.String(), &b)
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), &b)
 	if err != nil {
 		return errRecoveryAPI
 	}
@@ -88,6 +96,9 @@ func (a *recoveryAPI) request(method, path string, q url.Values, body, out any) 
 		want = http.StatusNoContent
 	}
 	if resp.StatusCode != want {
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return errRecoveryAccessDenied
+		}
 		return errRecoveryAPI
 	} // Never read or log error bodies.
 	if out != nil {

@@ -12,13 +12,38 @@ Discord transports run entirely in memory. Both features remain off by default.
 
 ## Commands and controls
 
-- `/authctl password action:reset user:<exact username>`: prevalidate a human account,
+- `/authctl password action:reset user:<Authentik account>`: prevalidate a human account,
   obtain an ephemeral confirmation, then initiate the configured native anonymous
   recovery flow with that username and stop at `ak-stage-email`.
-- `/authctl mfa action:reset user:<exact username>`: preview the exact TOTP enrollment count,
+- `/authctl mfa action:reset user:<Authentik account>`: preview the exact TOTP enrollment count,
   confirm, and delete only those TOTP IDs. Other enrollment types are preserved.
 
 `action` is a required choice field; `reset` is its only permitted value.
+
+The `user` field provides searchable Authentik username suggestions for eligible
+internal and external human accounts. Only authorized recovery callers in the
+configured guild/channel can receive them. This is a STRING autocomplete field,
+not a Discord member picker; `action` remains the single static `reset` choice.
+A background scan reuses the full account and effective-permission checks and
+caches only usernames and stable IDs in memory. Its maximum age is **90 seconds,
+measured from the start of the scan**. One refresh runs at a time with at most
+four concurrent checks, a 40-second timeout and a five-second pause after each
+attempt. Failed refreshes clear the snapshot; startup and expired caches return
+no suggestions. API authentication/permission denials stop background refresh
+until restart; they are not retried automatically. Request traffic never triggers
+refresh storms or waits on HTTP.
+An account promoted or deleted after a scan can briefly remain visible, but the
+cache never authorizes recovery: preview, confirmation and execution still check
+caller/target eligibility afresh. This suggestion-only staleness is intentional.
+Discord permits at most 25 suggestions: type part of a username to search the
+entire snapshot, including accounts beyond the initial results. Inventory reads
+retain the existing fail-closed pagination bounds (100 pages/10,000 records).
+No email addresses, credentials or factor data are cached or shown. Long names
+use a shortened label plus account ID; selections resolve the canonical identity
+again before preview. Plain exact username entry remains supported. Operation
+prerequisites (for example, a TOTP enrollment) are still checked during preview;
+suggestions perform no reset.
+
 
 Only configured explicit Discord callers in the exact configured guild and the
 existing exact `COMMAND_CHANNEL_ID` may preview, confirm, or cancel. DMs and missing

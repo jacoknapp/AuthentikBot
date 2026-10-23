@@ -34,7 +34,7 @@ func recoveryCommands() []*discordgo.ApplicationCommand {
 			Type: discordgo.ApplicationCommandOptionSubCommand, Name: entry.name, Description: entry.description,
 			Options: []*discordgo.ApplicationCommandOption{
 				{Type: discordgo.ApplicationCommandOptionString, Name: "action", Description: "Recovery action", Required: true, Choices: []*discordgo.ApplicationCommandOptionChoice{{Name: "reset", Value: "reset"}}},
-				{Type: discordgo.ApplicationCommandOptionString, Name: "user", Description: "Exact Authentik username; ordinary human accounts only", Required: true},
+				{Type: discordgo.ApplicationCommandOptionString, Name: "user", Description: "Search eligible Authentik accounts by username", Required: true, Autocomplete: true},
 			},
 		})
 	}
@@ -46,7 +46,7 @@ func recoveryCommands() []*discordgo.ApplicationCommand {
 	return []*discordgo.ApplicationCommand{{Name: authctlCommand, Description: "Authentik account recovery operations", DefaultMemberPermissions: &permissions, Contexts: &contexts, Options: subcommands}}
 }
 func isRecoveryInteraction(i *discordgo.InteractionCreate) bool {
-	if i.Type == discordgo.InteractionApplicationCommand {
+	if i.Type == discordgo.InteractionApplicationCommand || i.Type == discordgo.InteractionApplicationCommandAutocomplete {
 		name := i.ApplicationCommandData().Name
 		// Retired flat names are routed here only to reject stale Discord clients.
 		return name == authctlCommand || name == passwordCommand || name == mfaCommand || name == emailAction || name == mfaAction
@@ -134,6 +134,10 @@ func (r *recoveryService) previewMessage(p recoveryPending) string {
 	return fmt.Sprintf("Confirm removal of %d Authentik TOTP enrollment(s) for %s? Exact scope: %s. Only the previewed device IDs will be deleted. Other factors and existing sessions remain. A retained passkey may allow login without TOTP setup. Expires in two minutes.", len(p.Devices), target, strings.Join(scope, ", "))
 }
 func handleRecoveryInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if i.Type == discordgo.InteractionApplicationCommandAutocomplete {
+		handleRecoveryAutocomplete(s, i)
+		return
+	}
 	// Always acknowledge ephemerally before HTTP work. Never log Discord errors:
 	// they can contain interaction webhook tokens or raw response bodies.
 	mentions := &discordgo.MessageAllowedMentions{Parse: []discordgo.AllowedMentionType{}}

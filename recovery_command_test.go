@@ -33,7 +33,7 @@ func TestRecoveryGroupedCommandTree(t *testing.T) {
 		if action.Name != "action" || action.Type != discordgo.ApplicationCommandOptionString || !action.Required || action.Autocomplete || len(action.Choices) != 1 || action.Choices[0].Name != "reset" || action.Choices[0].Value != "reset" {
 			t.Fatal("wrong reset-only action choice")
 		}
-		if user.Name != "user" || user.Type != discordgo.ApplicationCommandOptionString || !user.Required || user.Autocomplete {
+		if user.Name != "user" || user.Type != discordgo.ApplicationCommandOptionString || !user.Required || !user.Autocomplete {
 			t.Fatal("wrong exact user argument")
 		}
 	}

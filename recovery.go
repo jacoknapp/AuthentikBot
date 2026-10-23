@@ -197,14 +197,18 @@ type recoveryGate struct {
 	Busy  bool
 }
 type recoveryService struct {
-	cfg     recoveryConfig
-	api     *recoveryAPI
-	audit   recoveryAudit
-	now     func() time.Time
-	mu      sync.Mutex
-	pending map[string]recoveryPending
-	gates   map[string]recoveryGate
-	callers map[string]time.Time
+	suggestMu        sync.Mutex
+	suggestRefreshMu sync.Mutex
+	suggestLoop      sync.Once
+	suggestions      recoverySuggestionSnapshot
+	cfg              recoveryConfig
+	api              *recoveryAPI
+	audit            recoveryAudit
+	now              func() time.Time
+	mu               sync.Mutex
+	pending          map[string]recoveryPending
+	gates            map[string]recoveryGate
+	callers          map[string]time.Time
 }
 
 func newRecoveryFromEnv(legacy Config) (*recoveryService, error) {
@@ -323,6 +327,13 @@ func (r *recoveryService) preview(c recoveryContext, action, name string) (strin
 	if !r.allowed(c, action) || !validRecoveryName(name) {
 		return deny(errors.New("Recovery disabled or unauthorized"))
 	}
+	selected, err := r.selectedUser(name)
+	if err != nil {
+		return deny(err)
+	}
+	if selected != nil {
+		name = selected.Username
+	}
 	if err := r.reserve(c, name); err != nil {
 		return deny(err)
 	}
@@ -336,6 +347,9 @@ func (r *recoveryService) preview(c recoveryContext, action, name string) (strin
 	p.User = u
 	if err != nil {
 		return deny(err)
+	}
+	if selected != nil && !selected.same(u) {
+		return deny(errors.New("Selected account changed during eligibility scan"))
 	}
 	p.User = u
 	p.ServiceID = id

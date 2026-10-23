@@ -575,11 +575,36 @@ Potential improvements:
 
 ## Optional recovery commands
 
-`/authctl password action:reset user:<exact username>` initiates Authentik's native
+`/authctl password action:reset user:<Authentik account>` initiates Authentik's native
 anonymous email-link recovery and stops at the email challenge. `/authctl mfa action:reset
-user:<exact username>` deletes only the previewed TOTP enrollments. Both are
+user:<Authentik account>` deletes only the previewed TOTP enrollments. Both are
 disabled and unregistered by default. The required `action` choice currently permits
 only `reset`.
+
+The `user` field provides searchable Authentik username suggestions for eligible
+internal and external human accounts. Only authorized recovery callers in the
+configured guild/channel can receive them. This is a STRING autocomplete field,
+not a Discord member picker; `action` remains the single static `reset` choice.
+A background scan reuses the full account and effective-permission checks and
+caches only usernames and stable IDs in memory. Its maximum age is **90 seconds,
+measured from the start of the scan**. One refresh runs at a time with at most
+four concurrent checks, a 40-second timeout and a five-second pause after each
+attempt. Failed refreshes clear the snapshot; startup and expired caches return
+no suggestions. API authentication/permission denials stop background refresh
+until restart; they are not retried automatically. Request traffic never triggers
+refresh storms or waits on HTTP.
+An account promoted or deleted after a scan can briefly remain visible, but the
+cache never authorizes recovery: preview, confirmation and execution still check
+caller/target eligibility afresh. This suggestion-only staleness is intentional.
+Discord permits at most 25 suggestions: type part of a username to search the
+entire snapshot, including accounts beyond the initial results. Inventory reads
+retain the existing fail-closed pagination bounds (100 pages/10,000 records).
+No email addresses, credentials or factor data are cached or shown. Long names
+use a shortened label plus account ID; selections resolve the canonical identity
+again before preview. Plain exact username entry remains supported. Operation
+prerequisites (for example, a TOTP enrollment) are still checked during preview;
+suggestions perform no reset.
+
 
 Recovery requires an explicitly selected credential mode, explicit Discord
 caller IDs, an exact guild and the existing command channel, private durable

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -136,6 +137,9 @@ func main() {
 	}
 	if recovery != nil {
 		defer recovery.audit.Close()
+		cacheCtx, stopCache := context.WithCancel(context.Background())
+		defer stopCache()
+		recovery.startAutocompleteCache(cacheCtx)
 	}
 	dg, err := discordgo.New("Bot " + config.DiscordToken)
 	if err != nil {
