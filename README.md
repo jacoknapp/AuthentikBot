@@ -575,11 +575,14 @@ Potential improvements:
 
 ## Optional recovery commands
 
-`/authctl password action:reset user:<Authentik account>` initiates Authentik's native
-anonymous email-link recovery and stops at the email challenge. `/authctl mfa action:reset
+`/password action:reset user:<Authentik account>` initiates Authentik's native
+anonymous email-link recovery and stops at the email challenge. `/mfa action:reset
 user:<Authentik account>` deletes only the previewed TOTP enrollments. Both are
 disabled and unregistered by default. The required `action` choice currently permits
 only `reset`.
+
+These recovery commands are top-level, alongside the unchanged `/invite`,
+`/group`, and `/user` commands. The `/authctl` wrapper is no longer registered.
 
 The `user` field provides searchable Authentik username suggestions for eligible
 internal and external human accounts. Only authorized recovery callers in the

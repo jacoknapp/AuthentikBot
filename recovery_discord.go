@@ -19,7 +19,9 @@ func recoveryCommands() []*discordgo.ApplicationCommand {
 	if recovery == nil {
 		return nil
 	}
-	var subcommands []*discordgo.ApplicationCommandOption
+	var commands []*discordgo.ApplicationCommand
+	permissions := int64(0)
+	contexts := []discordgo.InteractionContextType{discordgo.InteractionContextGuild}
 	for _, entry := range []struct {
 		name, description string
 		enabled           bool
@@ -30,25 +32,21 @@ func recoveryCommands() []*discordgo.ApplicationCommand {
 		if !entry.enabled {
 			continue
 		}
-		subcommands = append(subcommands, &discordgo.ApplicationCommandOption{
-			Type: discordgo.ApplicationCommandOptionSubCommand, Name: entry.name, Description: entry.description,
+		commands = append(commands, &discordgo.ApplicationCommand{
+			Name: entry.name, Type: discordgo.ChatApplicationCommand, Description: entry.description, DefaultMemberPermissions: &permissions, Contexts: &contexts,
 			Options: []*discordgo.ApplicationCommandOption{
 				{Type: discordgo.ApplicationCommandOptionString, Name: "action", Description: "Recovery action", Required: true, Choices: []*discordgo.ApplicationCommandOptionChoice{{Name: "reset", Value: "reset"}}},
 				{Type: discordgo.ApplicationCommandOptionString, Name: "user", Description: "Search eligible Authentik accounts by username", Required: true, Autocomplete: true},
 			},
 		})
 	}
-	if len(subcommands) == 0 {
-		return nil
-	}
-	permissions := int64(0)
-	contexts := []discordgo.InteractionContextType{discordgo.InteractionContextGuild}
-	return []*discordgo.ApplicationCommand{{Name: authctlCommand, Description: "Authentik account recovery operations", DefaultMemberPermissions: &permissions, Contexts: &contexts, Options: subcommands}}
+	return commands
 }
+
 func isRecoveryInteraction(i *discordgo.InteractionCreate) bool {
 	if i.Type == discordgo.InteractionApplicationCommand || i.Type == discordgo.InteractionApplicationCommandAutocomplete {
 		name := i.ApplicationCommandData().Name
-		// Retired flat names are routed here only to reject stale Discord clients.
+		// The retired authctl wrapper and old flat names only reject stale clients.
 		return name == authctlCommand || name == passwordCommand || name == mfaCommand || name == emailAction || name == mfaAction
 	}
 	if i.Type == discordgo.InteractionMessageComponent {
@@ -60,14 +58,10 @@ func isRecoveryInteraction(i *discordgo.InteractionCreate) bool {
 // The Discord tree is presentation only: internal action IDs stay stable so
 // authorization, confirmations, cooldowns and audit semantics do not change.
 func parseRecoveryCommand(data discordgo.ApplicationCommandInteractionData) (action, user string, valid bool) {
-	if data.Name != authctlCommand || len(data.Options) != 1 || data.Options[0] == nil {
+	if len(data.Options) != 2 {
 		return "", "", false
 	}
-	sub := data.Options[0]
-	if sub.Type != discordgo.ApplicationCommandOptionSubCommand || len(sub.Options) != 2 {
-		return "", "", false
-	}
-	switch sub.Name {
+	switch data.Name {
 	case passwordCommand:
 		action = emailAction
 	case mfaCommand:
@@ -76,7 +70,7 @@ func parseRecoveryCommand(data discordgo.ApplicationCommandInteractionData) (act
 		return "", "", false
 	}
 	seen := map[string]bool{}
-	for _, option := range sub.Options {
+	for _, option := range data.Options {
 		if option == nil || option.Type != discordgo.ApplicationCommandOptionString || len(option.Options) != 0 || seen[option.Name] {
 			return "", "", false
 		}
@@ -101,7 +95,7 @@ func parseRecoveryCommand(data discordgo.ApplicationCommandInteractionData) (act
 func (r *recoveryService) previewCommand(c recoveryContext, data discordgo.ApplicationCommandInteractionData) (string, recoveryPending, error) {
 	action, user, valid := parseRecoveryCommand(data)
 	if !valid {
-		err := errors.New("Use /authctl password action:reset user:<username> or /authctl mfa action:reset user:<username>")
+		err := errors.New("Use /password action:reset user:<username> or /mfa action:reset user:<username>")
 		if e := r.record(c, "recovery-command", 0, "denied", 0); e != nil {
 			err = e
 		}

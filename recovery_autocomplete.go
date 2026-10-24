@@ -39,14 +39,10 @@ var errSuggestionRefreshBusy = errors.New("Suggestion refresh already running")
 // Autocomplete receives partial command data: action may not be filled yet, but
 // any supplied action must remain reset and only the user field may be focused.
 func parseRecoveryAutocomplete(data discordgo.ApplicationCommandInteractionData) (action, query string, valid bool) {
-	if data.Name != authctlCommand || len(data.Options) != 1 || data.Options[0] == nil {
+	if len(data.Options) < 1 || len(data.Options) > 2 {
 		return
 	}
-	sub := data.Options[0]
-	if sub.Type != discordgo.ApplicationCommandOptionSubCommand || len(sub.Options) < 1 || len(sub.Options) > 2 {
-		return
-	}
-	switch sub.Name {
+	switch data.Name {
 	case passwordCommand:
 		action = emailAction
 	case mfaCommand:
@@ -55,7 +51,7 @@ func parseRecoveryAutocomplete(data discordgo.ApplicationCommandInteractionData)
 		return
 	}
 	seen := map[string]bool{}
-	for _, o := range sub.Options {
+	for _, o := range data.Options {
 		if o == nil || o.Type != discordgo.ApplicationCommandOptionString || len(o.Options) != 0 || seen[o.Name] {
 			return "", "", false
 		}

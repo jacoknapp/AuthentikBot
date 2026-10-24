@@ -684,7 +684,7 @@ func TestRecoveryDiscordUI(t *testing.T) {
 		}
 		return mockResponse(204, nil), nil
 	})}
-	i := &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{ID: "id", AppID: "app", Token: "mock-interaction", Type: discordgo.InteractionApplicationCommand, ChannelID: "200", GuildID: "300", Member: &discordgo.Member{User: &discordgo.User{ID: "100"}}, Data: groupedRecoveryData(mfaCommand, "alice")}}
+	i := &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{ID: "id", AppID: "app", Token: "mock-interaction", Type: discordgo.InteractionApplicationCommand, ChannelID: "200", GuildID: "300", Member: &discordgo.Member{User: &discordgo.User{ID: "100"}}, Data: recoveryCommandData(mfaCommand, "alice")}}
 	interactionCreate(session, i)
 	if len(responses) != 2 {
 		t.Fatal("missing acknowledgement/preview")

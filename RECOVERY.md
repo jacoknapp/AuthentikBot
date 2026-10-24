@@ -12,13 +12,16 @@ Discord transports run entirely in memory. Both features remain off by default.
 
 ## Commands and controls
 
-- `/authctl password action:reset user:<Authentik account>`: prevalidate a human account,
+- `/password action:reset user:<Authentik account>`: prevalidate a human account,
   obtain an ephemeral confirmation, then initiate the configured native anonymous
   recovery flow with that username and stop at `ak-stage-email`.
-- `/authctl mfa action:reset user:<Authentik account>`: preview the exact TOTP enrollment count,
+- `/mfa action:reset user:<Authentik account>`: preview the exact TOTP enrollment count,
   confirm, and delete only those TOTP IDs. Other enrollment types are preserved.
 
 `action` is a required choice field; `reset` is its only permitted value.
+
+These recovery commands are top-level, alongside the unchanged `/invite`,
+`/group`, and `/user` commands. The `/authctl` wrapper is no longer registered.
 
 The `user` field provides searchable Authentik username suggestions for eligible
 internal and external human accounts. Only authorized recovery callers in the

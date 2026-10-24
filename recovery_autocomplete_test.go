@@ -145,8 +145,8 @@ func (a *autocompleteFixture) roundTrip(req *http.Request) (*http.Response, erro
 	return mockResponse(404, nil), nil
 }
 func autocompleteData(name, query string) discordgo.ApplicationCommandInteractionData {
-	d := groupedRecoveryData(name, query)
-	d.Options[0].Options[1].Focused = true
+	d := recoveryCommandData(name, query)
+	d.Options[1].Focused = true
 	return d
 }
 func (a *autocompleteFixture) warm() {
@@ -346,39 +346,44 @@ func TestRecoveryAutocompletePartialParser(t *testing.T) {
 		if !ok || query != "" || action == "" {
 			t.Fatal("valid focus rejected")
 		}
-		d.Options[0].Options = d.Options[0].Options[1:]
+		d.Options = d.Options[1:]
 		if _, _, ok = parseRecoveryAutocomplete(d); !ok {
 			t.Fatal("partial action rejected")
 		}
 	}
-	for _, which := range []string{"old root", "old group", "action focused", "user unfocused", "duplicate", "unknown field", "wrong action", "wrong type", "nested", "nil"} {
+	for _, which := range []string{"authctl wrapper", "old email", "old MFA", "nested reset", "action focused", "user unfocused", "duplicate", "unknown field", "wrong action", "wrong type", "nested", "nil"} {
 		t.Run(which, func(t *testing.T) {
 			d := autocompleteData(passwordCommand, "")
-			sub := d.Options[0]
+			options := d.Options
 			switch which {
-			case "old root":
-				d.Name = passwordCommand
-			case "old group":
-				sub.Type = discordgo.ApplicationCommandOptionSubCommandGroup
+			case "authctl wrapper":
+				d.Name = authctlCommand
+				d.Options = []*discordgo.ApplicationCommandInteractionDataOption{{Name: passwordCommand, Type: discordgo.ApplicationCommandOptionSubCommand, Options: options}}
+			case "old email":
+				d.Name = emailAction
+			case "old MFA":
+				d.Name = mfaAction
+			case "nested reset":
+				d.Options = []*discordgo.ApplicationCommandInteractionDataOption{{Name: "reset", Type: discordgo.ApplicationCommandOptionSubCommand, Options: options}}
 			case "action focused":
-				sub.Options[0].Focused = true
+				options[0].Focused = true
 			case "user unfocused":
-				sub.Options[1].Focused = false
+				options[1].Focused = false
 			case "duplicate":
-				sub.Options = append(sub.Options, sub.Options[1])
+				d.Options = append(options, options[1])
 			case "unknown field":
-				sub.Options[0].Name = "unknown"
+				options[0].Name = "unknown"
 			case "wrong action":
-				sub.Options[0].Value = "remove"
+				options[0].Value = "remove"
 			case "wrong type":
-				sub.Options[1].Type = discordgo.ApplicationCommandOptionUser
+				options[1].Type = discordgo.ApplicationCommandOptionUser
 			case "nested":
-				sub.Options[1].Options = []*discordgo.ApplicationCommandInteractionDataOption{sub.Options[0]}
+				options[1].Options = []*discordgo.ApplicationCommandInteractionDataOption{options[0]}
 			case "nil":
-				sub.Options[0] = nil
+				options[0] = nil
 			}
 			if _, _, ok := parseRecoveryAutocomplete(d); ok {
-				t.Fatal("malformed focus accepted")
+				t.Fatal("malformed autocomplete accepted")
 			}
 		})
 	}
