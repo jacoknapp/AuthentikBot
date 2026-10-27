@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -197,18 +198,22 @@ type recoveryGate struct {
 	Busy  bool
 }
 type recoveryService struct {
-	suggestMu        sync.Mutex
-	suggestRefreshMu sync.Mutex
-	suggestLoop      sync.Once
-	suggestions      recoverySuggestionSnapshot
-	cfg              recoveryConfig
-	api              *recoveryAPI
-	audit            recoveryAudit
-	now              func() time.Time
-	mu               sync.Mutex
-	pending          map[string]recoveryPending
-	gates            map[string]recoveryGate
-	callers          map[string]time.Time
+	suggestMu         sync.Mutex
+	suggestRefreshMu  sync.Mutex
+	suggestLoop       sync.Once
+	suggestContext    context.Context
+	suggestRefreshing bool
+	suggestRetryAfter time.Time
+	suggestStopped    bool
+	suggestions       recoverySuggestionSnapshot
+	cfg               recoveryConfig
+	api               *recoveryAPI
+	audit             recoveryAudit
+	now               func() time.Time
+	mu                sync.Mutex
+	pending           map[string]recoveryPending
+	gates             map[string]recoveryGate
+	callers           map[string]time.Time
 }
 
 func newRecoveryFromEnv(legacy Config) (*recoveryService, error) {

@@ -21,7 +21,7 @@ const recoveryAutocompleteLimit = 25
 const recoveryAutocompleteBudget = 100 * time.Millisecond
 const recoverySuggestionMaxAge = 90 * time.Second
 const recoverySuggestionRefreshTimeout = 40 * time.Second
-const recoverySuggestionRefreshPause = 5 * time.Second
+const recoverySuggestionRetryPause = 30 * time.Second
 
 type recoverySuggestion struct {
 	PK       int64
@@ -217,42 +217,56 @@ func (r *recoveryService) refreshAutocomplete(ctx context.Context) error {
 
 func (r *recoveryService) startAutocompleteCache(ctx context.Context) {
 	r.suggestLoop.Do(func() {
-		go func() {
-			for {
-				if ctx.Err() != nil {
-					return
-				}
-				started := time.Now()
-				err := r.refreshAutocomplete(ctx)
-				if ctx.Err() != nil {
-					return
-				}
-				if errors.Is(err, errRecoveryAccessDenied) {
-					log.Print("Recovery suggestions refresh stopped: API access denied")
-					return
-				}
-				if err != nil {
-					log.Print("Recovery suggestions refresh failed; suggestions unavailable")
-				} else {
-					r.suggestMu.Lock()
-					count := len(r.suggestions.Users)
-					r.suggestMu.Unlock()
-					log.Printf("Recovery suggestions refreshed: accounts=%d elapsed_ms=%d max_age_seconds=90", count, time.Since(started).Milliseconds())
-				}
-				timer := time.NewTimer(recoverySuggestionRefreshPause)
-				select {
-				case <-ctx.Done():
-					timer.Stop()
-					return
-				case <-timer.C:
-				}
-			}
-		}()
+		r.suggestMu.Lock()
+		r.suggestContext = ctx
+		r.suggestMu.Unlock()
 	})
 }
 
+// Called only after the autocomplete caller and input gates. Startup and idle
+// time do no work. A cold/expired picker schedules one scan without delaying the
+// Discord response; later interactions reuse its snapshot until it expires.
+func (r *recoveryService) requestAutocompleteRefresh() {
+	r.suggestMu.Lock()
+	ctx := r.suggestContext
+	now := r.now()
+	snapshot := r.suggestions
+	if ctx == nil || ctx.Err() != nil || r.suggestStopped || r.suggestRefreshing || now.Before(r.suggestRetryAfter) ||
+		(snapshot.Ready && !now.Before(snapshot.Started) && now.Sub(snapshot.Started) < recoverySuggestionMaxAge) {
+		r.suggestMu.Unlock()
+		return
+	}
+	r.suggestRefreshing = true
+	r.suggestMu.Unlock()
+	go func() {
+		started := time.Now()
+		err := r.refreshAutocomplete(ctx)
+		r.suggestMu.Lock()
+		r.suggestRefreshing = false
+		if err != nil {
+			r.suggestRetryAfter = r.now().Add(recoverySuggestionRetryPause)
+		}
+		denied := errors.Is(err, errRecoveryAccessDenied)
+		if denied {
+			r.suggestStopped = true
+		}
+		count := len(r.suggestions.Users)
+		r.suggestMu.Unlock()
+		if ctx.Err() != nil {
+			return
+		}
+		if denied {
+			log.Print("Recovery suggestions refresh stopped: API access denied")
+		} else if err != nil {
+			log.Print("Recovery suggestions refresh failed; suggestions unavailable")
+		} else {
+			log.Printf("Recovery suggestions refreshed: accounts=%d elapsed_ms=%d max_age_seconds=90", count, time.Since(started).Milliseconds())
+		}
+	}()
+}
+
 // Every request checks caller/guild/channel/feature authorization before touching
-// the snapshot. Request volume never starts refreshes or makes Authentik requests.
+// the snapshot or scheduling work. Requests never wait for Authentik.
 func (r *recoveryService) autocompleteChoices(ctx context.Context, c recoveryContext, action, query string) []*discordgo.ApplicationCommandOptionChoice {
 	empty := []*discordgo.ApplicationCommandOptionChoice{}
 	if !r.allowed(c, action) || !utf8.ValidString(query) || utf8.RuneCountInString(query) > 150 || strings.ContainsAny(query, "\x00\r\n") || ctx.Err() != nil {
@@ -263,6 +277,7 @@ func (r *recoveryService) autocompleteChoices(ctx context.Context, c recoveryCon
 	r.suggestMu.Unlock()
 	now := r.now()
 	if !snapshot.Ready || now.Before(snapshot.Started) || now.Sub(snapshot.Started) >= recoverySuggestionMaxAge {
+		r.requestAutocompleteRefresh()
 		return empty
 	}
 	query = recoveryIdentifierFold(strings.TrimSpace(query))

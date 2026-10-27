@@ -588,18 +588,22 @@ The `user` field provides searchable Authentik username suggestions for eligible
 internal and external human accounts. Only authorized recovery callers in the
 configured guild/channel can receive them. This is a STRING autocomplete field,
 not a Discord member picker; `action` remains the single static `reset` choice.
-A background scan reuses the full account and effective-permission checks and
-caches only usernames and stable IDs in memory. Its maximum age is **90 seconds,
-measured from the start of the scan**. One refresh runs at a time with at most
-four concurrent checks, a 40-second timeout and a five-second pause after each
-attempt. Shared-role permission reads are deduplicated by role UUID and visibility
+A scan runs only when an authorized picker request finds its cache cold or expired;
+startup and idle time generate no scans. It reuses the full account and
+effective-permission checks and caches only usernames and stable IDs in memory.
+Its maximum age is **90 seconds, measured from the start of the scan**. One refresh
+runs at a time with at most four concurrent checks and a 40-second timeout.
+Shared-role permission reads are deduplicated by role UUID and visibility
 mode within that one scan, including single-flight error results. This memo is
 fresh for every scan and exists only on its cloned API client; credential identity,
 user records and effective role membership are not memoized. Preview, confirmation
 and execution use the original uncached client and repeat full grant checks. Failed refreshes clear the snapshot; startup and expired caches return
-no suggestions. API authentication/permission denials stop background refresh
-until restart; they are not retried automatically. Request traffic never triggers
-refresh storms or waits on HTTP.
+no suggestions while a requested scan runs. After opening a cold picker, allow
+the scan to finish and type again to see suggestions; exact username entry also
+works without waiting for the picker. API authentication/permission denials stop
+refreshes until restart. Other failures impose a 30-second backoff, after which
+another authorized request is required to retry. There is no periodic refresh or
+automatic retry, and concurrent requests share one scan without waiting on HTTP.
 An account promoted or deleted after a scan can briefly remain visible, but the
 cache never authorizes recovery: preview, confirmation and execution still check
 caller/target eligibility afresh. This suggestion-only staleness is intentional.

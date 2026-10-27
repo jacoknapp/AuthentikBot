@@ -28,6 +28,7 @@ type autocompleteFixture struct {
 	delay        time.Duration
 	freshChanged bool
 	calls        atomic.Int64
+	scans        atomic.Int64
 	writes       atomic.Int64
 	active       atomic.Int64
 	maxActive    atomic.Int64
@@ -85,6 +86,9 @@ func (a *autocompleteFixture) roundTrip(req *http.Request) (*http.Response, erro
 	case "/api/v3/core/users/me/":
 		return mockResponse(200, map[string]any{"user": a.f.service}), nil
 	case "/api/v3/core/users/":
+		if req.URL.Query().Get("username") == "" {
+			a.scans.Add(1)
+		}
 		if name := req.URL.Query().Get("username"); name != "" {
 			filtered := []recoveryUser{}
 			for _, u := range users {
@@ -163,10 +167,39 @@ func (a *autocompleteFixture) choices(query string) []*discordgo.ApplicationComm
 	defer cancel()
 	return a.f.r.autocompleteChoices(ctx, a.f.ctx, emailAction, query)
 }
+
+func (a *autocompleteFixture) waitForRefresh() {
+	a.f.t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		a.f.r.suggestMu.Lock()
+		busy := a.f.r.suggestRefreshing
+		a.f.r.suggestMu.Unlock()
+		if !busy {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	a.f.t.Fatal("demand refresh did not finish")
+}
+
+func (a *autocompleteFixture) startDemandCache() context.CancelFunc {
+	a.f.t.Helper()
+	a.f.r.now = time.Now
+	ctx, cancel := context.WithCancel(context.Background())
+	a.f.r.startAutocompleteCache(ctx)
+	a.f.t.Cleanup(func() {
+		cancel()
+		a.waitForRefresh()
+	})
+	return cancel
+}
+
 func TestRecoveryAutocompleteCallerDenyBeforeHTTP(t *testing.T) {
 	for _, which := range []string{"caller", "guild", "channel", "dm", "disabled", "audit"} {
 		t.Run(which, func(t *testing.T) {
 			a := newAutocompleteFixture(t, 2)
+			a.startDemandCache()
 			c := a.f.ctx
 			switch which {
 			case "caller":
@@ -183,6 +216,7 @@ func TestRecoveryAutocompleteCallerDenyBeforeHTTP(t *testing.T) {
 				a.f.r.audit = nil
 			}
 			got := a.f.r.autocompleteChoices(context.Background(), c, emailAction, "")
+			a.waitForRefresh()
 			if len(got) != 0 || a.calls.Load() != 0 {
 				t.Fatal("unauthorized autocomplete queried Authentik")
 			}
@@ -495,41 +529,55 @@ func TestRecoveryAutocompleteCachedDataStillRequiresCaller(t *testing.T) {
 		t.Fatal("unauthorized caller read cached targets")
 	}
 }
-func TestRecoveryAutocompleteBackgroundRefreshAndConcurrency(t *testing.T) {
+func TestRecoveryAutocompleteDemandRefreshAndConcurrency(t *testing.T) {
 	a := newAutocompleteFixture(t, 10)
-	a.f.r.now = time.Now
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	a.f.r.startAutocompleteCache(ctx)
-	a.f.r.startAutocompleteCache(ctx)
-	until := time.Now().Add(2 * time.Second)
-	for len(a.choices("")) == 0 && time.Now().Before(until) {
-		time.Sleep(time.Millisecond)
+	a.delay = 2 * time.Millisecond
+	a.startDemandCache()
+	var offset atomic.Int64
+	a.f.r.now = func() time.Time { return time.Now().Add(time.Duration(offset.Load())) }
+	a.f.r.startAutocompleteCache(context.Background())
+	time.Sleep(20 * time.Millisecond)
+	if a.calls.Load() != 0 {
+		t.Fatal("startup queried Authentik without demand")
 	}
-	if len(a.choices("")) != 10 {
-		t.Fatal("background cache did not warm")
+	start := time.Now()
+	if len(a.choices("")) != 0 || time.Since(start) > 100*time.Millisecond {
+		t.Fatal("cold picker waited for HTTP")
 	}
-	before := a.calls.Load()
 	var wg sync.WaitGroup
 	for n := 0; n < 100; n++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if len(a.choices("human")) != 10 {
-				t.Error("concurrent cache read lost data")
-			}
+			a.choices("human")
 		}()
 	}
 	wg.Wait()
-	if a.calls.Load() != before || a.maxActive.Load() > 4 {
-		t.Fatal("request-triggered refresh storm or unbounded worker pool")
+	a.waitForRefresh()
+	if a.scans.Load() != 1 || a.maxActive.Load() > 4 || len(a.choices("")) != 10 {
+		t.Fatal("demand was not coalesced into one bounded scan")
 	}
-	cancel()
-	for n := 0; n < 4; n++ {
-		wg.Add(1)
-		go func() { defer wg.Done(); _ = a.f.r.refreshAutocomplete(context.Background()) }()
+	before := a.calls.Load()
+	// Longer than the former idle refresh pause: no timer may repeat this scan.
+	time.Sleep(5100 * time.Millisecond)
+	for n := 0; n < 100; n++ {
+		a.choices("human")
 	}
-	wg.Wait()
+	if a.calls.Load() != before {
+		t.Fatal("idle time or fresh cache reads triggered another scan")
+	}
+	offset.Store(int64(recoverySuggestionMaxAge))
+	time.Sleep(20 * time.Millisecond)
+	if a.calls.Load() != before {
+		t.Fatal("expiry refreshed without demand")
+	}
+	if len(a.choices("")) != 0 {
+		t.Fatal("expired suggestions were served")
+	}
+	a.waitForRefresh()
+	if a.scans.Load() != 2 || len(a.choices("")) != 10 {
+		t.Fatal("expired picker did not refresh on new demand")
+	}
 }
 
 func TestRecoveryAutocompleteCachedSelectionRecheckedAtConfirmation(t *testing.T) {
@@ -574,18 +622,129 @@ func TestRecoveryAutocompleteMaximumAgeStartsBeforeScan(t *testing.T) {
 		t.Fatal("refresh completion improperly renewed maximum age")
 	}
 }
-func TestRecoveryAutocompleteAccessDenialStopsBackgroundRefresh(t *testing.T) {
+func TestRecoveryAutocompleteAccessDenialStopsDemandRefresh(t *testing.T) {
 	a := newAutocompleteFixture(t, 1)
-	a.f.r.now = time.Now
 	a.f.r.api.client.Transport = mockRoundTripper(func(req *http.Request) (*http.Response, error) {
 		a.calls.Add(1)
 		return mockResponse(403, map[string]string{"private": "MOCK_PRIVATE_DENIAL"}), nil
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), recoverySuggestionRefreshPause+time.Second)
-	defer cancel()
-	a.f.r.startAutocompleteCache(ctx)
-	time.Sleep(recoverySuggestionRefreshPause + 100*time.Millisecond)
+	a.startDemandCache()
+	var offset atomic.Int64
+	a.f.r.now = func() time.Time { return time.Now().Add(time.Duration(offset.Load())) }
+	a.choices("")
+	a.waitForRefresh()
+	offset.Store(int64(time.Hour))
+	for n := 0; n < 100; n++ {
+		a.choices("")
+	}
+	a.waitForRefresh()
 	if a.calls.Load() != 1 || len(a.choices("")) != 0 {
-		t.Fatal("denied background read was retried or cached data served")
+		t.Fatal("denied demand read was retried or cached data served")
+	}
+}
+
+func TestRecoveryAutocompleteDemandFailureBackoff(t *testing.T) {
+	a := newAutocompleteFixture(t, 1)
+	a.fail = "/api/v3/core/users/me/"
+	a.startDemandCache()
+	var offset atomic.Int64
+	a.f.r.now = func() time.Time { return time.Now().Add(time.Duration(offset.Load())) }
+	a.choices("")
+	a.waitForRefresh()
+	for n := 0; n < 100; n++ {
+		a.choices("")
+	}
+	if a.calls.Load() != 1 {
+		t.Fatal("failed demand caused a retry storm")
+	}
+	offset.Store(int64(recoverySuggestionRetryPause + time.Second))
+	time.Sleep(20 * time.Millisecond)
+	if a.calls.Load() != 1 {
+		t.Fatal("backoff scheduled an automatic retry")
+	}
+	a.mu.Lock()
+	a.fail = ""
+	a.mu.Unlock()
+	a.choices("")
+	a.waitForRefresh()
+	if a.scans.Load() != 1 || len(a.choices("")) != 1 {
+		t.Fatal("new demand after backoff did not recover")
+	}
+}
+
+func TestRecoveryAutocompleteDemandInputGates(t *testing.T) {
+	for _, query := range []string{"\xff", "\x00", "\r", "\n", strings.Repeat("x", 151)} {
+		t.Run(fmt.Sprintf("%q", query), func(t *testing.T) {
+			a := newAutocompleteFixture(t, 1)
+			a.startDemandCache()
+			a.choices(query)
+			a.waitForRefresh()
+			if a.calls.Load() != 0 {
+				t.Fatal("invalid input triggered a scan")
+			}
+		})
+	}
+	a := newAutocompleteFixture(t, 1)
+	a.startDemandCache()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	a.f.r.autocompleteChoices(ctx, a.f.ctx, emailAction, "")
+	a.waitForRefresh()
+	if a.calls.Load() != 0 {
+		t.Fatal("canceled interaction triggered a scan")
+	}
+}
+
+func TestRecoveryAutocompleteDemandLifetime(t *testing.T) {
+	t.Run("outlives interaction", func(t *testing.T) {
+		a := newAutocompleteFixture(t, 1)
+		a.delay = 25 * time.Millisecond
+		a.startDemandCache()
+		ctx, cancel := context.WithCancel(context.Background())
+		a.f.r.autocompleteChoices(ctx, a.f.ctx, emailAction, "")
+		cancel()
+		a.waitForRefresh()
+		if len(a.choices("")) != 1 {
+			t.Fatal("interaction cancellation aborted the shared scan")
+		}
+	})
+	t.Run("stops with service", func(t *testing.T) {
+		a := newAutocompleteFixture(t, 1)
+		started := make(chan struct{})
+		a.f.r.api.client.Transport = mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+			a.calls.Add(1)
+			close(started)
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		})
+		cancel := a.startDemandCache()
+		a.choices("")
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("demand did not start a request")
+		}
+		cancel()
+		a.waitForRefresh()
+		a.choices("")
+		a.waitForRefresh()
+		if a.calls.Load() != 1 {
+			t.Fatal("canceled service started more work")
+		}
+	})
+}
+
+func TestRecoveryAutocompleteDemandCachesEmptyResult(t *testing.T) {
+	a := newAutocompleteFixture(t, 0)
+	a.startDemandCache()
+	a.choices("")
+	a.waitForRefresh()
+	before := a.calls.Load()
+	for n := 0; n < 100; n++ {
+		a.choices("")
+	}
+	a.waitForRefresh()
+	if a.scans.Load() != 1 || a.calls.Load() != before {
+		t.Fatal("valid empty result was treated as an expired cache")
 	}
 }
