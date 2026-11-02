@@ -1,6 +1,6 @@
 # Build stage
-# Platform: GitHub Actions builds; pinned to Go 1.25 (latest as of 2026-01-20) to match go.mod
-FROM golang:1.25-alpine AS builder
+# Keep the builder's Go minor version aligned with go.mod.
+FROM golang:1.27-alpine AS builder
 
 WORKDIR /app
 
