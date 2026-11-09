@@ -206,6 +206,8 @@ type recoveryService struct {
 	suggestRetryAfter time.Time
 	suggestStopped    bool
 	suggestions       recoverySuggestionSnapshot
+	directory         recoverySuggestionSnapshot
+	directoryDone     chan struct{}
 	cfg               recoveryConfig
 	api               *recoveryAPI
 	audit             recoveryAudit

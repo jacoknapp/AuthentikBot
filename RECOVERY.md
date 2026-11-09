@@ -35,10 +35,14 @@ attempt. Shared-role permission reads are deduplicated by role UUID and visibili
 mode within that one scan, including single-flight error results. This memo is
 fresh for every scan and exists only on its cloned API client; credential identity,
 user records and effective role membership are not memoized. Preview, confirmation
-and execution use the original uncached client and repeat full grant checks. Failed refreshes clear the snapshot; startup and expired caches return
-no suggestions. API authentication/permission denials stop background refresh
-until restart; they are not retried automatically. Request traffic never triggers
-refresh storms or waits on HTTP.
+and execution use the original uncached client and repeat full grant checks. Failed refreshes clear the snapshot. While the verified snapshot is cold or
+expired, the picker shows a directory from one bounded user-list read filtered
+by the same local account checks, without the role/permission scan; the first
+request waits at most 1.8 seconds for it. Role-privileged accounts may appear
+until the verified snapshot replaces it, but preview's full check denies them.
+API authentication/permission denials stop directory reads and background
+refresh until restart; they are not retried automatically. Request traffic never
+triggers refresh storms.
 An account promoted or deleted after a scan can briefly remain visible, but the
 cache never authorizes recovery: preview, confirmation and execution still check
 caller/target eligibility afresh. This suggestion-only staleness is intentional.

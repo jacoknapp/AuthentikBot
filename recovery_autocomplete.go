@@ -18,7 +18,8 @@ import (
 
 const recoveryChoicePrefix = "ak-user:"
 const recoveryAutocompleteLimit = 25
-const recoveryAutocompleteBudget = 100 * time.Millisecond
+const recoveryAutocompleteBudget = 1800 * time.Millisecond
+const recoveryDirectoryTimeout = 10 * time.Second
 const recoverySuggestionMaxAge = 90 * time.Second
 const recoverySuggestionRefreshTimeout = 40 * time.Second
 const recoverySuggestionRetryPause = 30 * time.Second
@@ -265,24 +266,112 @@ func (r *recoveryService) requestAutocompleteRefresh() {
 	}()
 }
 
-// Every request checks caller/guild/channel/feature authorization before touching
-// the snapshot or scheduling work. Requests never wait for Authentik.
-func (r *recoveryService) autocompleteChoices(ctx context.Context, c recoveryContext, action, query string) []*discordgo.ApplicationCommandOptionChoice {
-	empty := []*discordgo.ApplicationCommandOptionChoice{}
-	if !r.allowed(c, action) || !utf8.ValidString(query) || utf8.RuneCountInString(query) > 150 || strings.ContainsAny(query, "\x00\r\n") || ctx.Err() != nil {
-		return empty
+// Cold or expired pickers would otherwise stay empty: Discord does not ask again
+// until the caller types, and the full eligibility scan takes tens of seconds.
+// The directory is one bounded user-list read filtered by the same local account
+// checks (no role/permission scan). It only fills the picker until the verified
+// snapshot is ready; preview, confirmation and execution still validate afresh.
+// One fetch runs at a time and outlives the interaction that started it.
+func (r *recoveryService) directorySuggestions(ctx context.Context) ([]recoverySuggestion, bool) {
+	r.suggestMu.Lock()
+	service := r.suggestContext
+	fresh := func(s recoverySuggestionSnapshot, now time.Time) bool {
+		return s.Ready && !now.Before(s.Started) && now.Sub(s.Started) < recoverySuggestionMaxAge
+	}
+	now := r.now()
+	if service == nil || service.Err() != nil || r.suggestStopped {
+		r.suggestMu.Unlock()
+		return nil, false
+	}
+	if fresh(r.directory, now) {
+		users := r.directory.Users
+		r.suggestMu.Unlock()
+		return users, true
+	}
+	if now.Before(r.suggestRetryAfter) {
+		r.suggestMu.Unlock()
+		return nil, false
+	}
+	done := r.directoryDone
+	if done == nil {
+		done = make(chan struct{})
+		r.directoryDone = done
+		go r.fetchDirectory(service, done)
+	}
+	r.suggestMu.Unlock()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return nil, false
 	}
 	r.suggestMu.Lock()
-	snapshot := r.suggestions
-	r.suggestMu.Unlock()
-	now := r.now()
-	if !snapshot.Ready || now.Before(snapshot.Started) || now.Sub(snapshot.Started) >= recoverySuggestionMaxAge {
-		r.requestAutocompleteRefresh()
-		return empty
+	defer r.suggestMu.Unlock()
+	if ctx.Err() != nil || r.suggestStopped || !fresh(r.directory, r.now()) {
+		return nil, false
 	}
+	return r.directory.Users, true
+}
+
+func (r *recoveryService) fetchDirectory(service context.Context, done chan struct{}) {
+	started := r.now()
+	work, cancel := context.WithTimeout(service, recoveryDirectoryTimeout)
+	defer cancel()
+	api := *r.api
+	api.ctx = work
+	api.scanRoles = nil
+	users, err := recoveryList[recoveryUser](&api, "/api/v3/core/users/", url.Values{"include_groups": {"false"}, "include_roles": {"false"}, "ordering": {"pk"}})
+	var serviceID int64
+	if r.cfg.UseExistingToken {
+		serviceID = r.cfg.ExpectedUserID
+	}
+	listed := []recoverySuggestion{}
+	seenID := map[int64]bool{}
+	seenName := map[string]bool{}
+	for _, u := range users {
+		if err != nil {
+			break
+		}
+		if seenID[u.PK] || seenName[u.Username] {
+			err = errRecoveryProtected
+			break
+		}
+		seenID[u.PK] = true
+		seenName[u.Username] = true
+		if r.eligible(u, serviceID) && validRecoveryName(u.Username) && utf8.ValidString(u.Username) {
+			listed = append(listed, recoverySuggestion{PK: u.PK, Username: u.Username})
+		}
+	}
+	if err == nil && work.Err() != nil {
+		err = errRecoveryAPI
+	}
+	r.suggestMu.Lock()
+	if err != nil {
+		r.directory = recoverySuggestionSnapshot{}
+		if errors.Is(err, errRecoveryAccessDenied) {
+			r.suggestStopped = true
+		} else {
+			r.suggestRetryAfter = r.now().Add(recoverySuggestionRetryPause)
+		}
+	} else {
+		r.directory = recoverySuggestionSnapshot{Users: listed, Started: started, Ready: true}
+	}
+	r.directoryDone = nil
+	r.suggestMu.Unlock()
+	close(done)
+	if service.Err() != nil {
+		return
+	}
+	if errors.Is(err, errRecoveryAccessDenied) {
+		log.Print("Recovery suggestions directory stopped: API access denied")
+	} else if err != nil {
+		log.Print("Recovery suggestions directory failed; suggestions unavailable")
+	}
+}
+
+func matchRecoverySuggestions(users []recoverySuggestion, query string) []*discordgo.ApplicationCommandOptionChoice {
 	query = recoveryIdentifierFold(strings.TrimSpace(query))
 	matches := []recoverySuggestion{}
-	for _, u := range snapshot.Users {
+	for _, u := range users {
 		if strings.Contains(recoveryIdentifierFold(u.Username), query) {
 			matches = append(matches, u)
 		}
@@ -307,13 +396,6 @@ func (r *recoveryService) autocompleteChoices(ctx context.Context, c recoveryCon
 	if len(matches) > recoveryAutocompleteLimit {
 		matches = matches[:recoveryAutocompleteLimit]
 	}
-	r.suggestMu.Lock()
-	current := r.suggestions
-	r.suggestMu.Unlock()
-	now = r.now()
-	if !current.Ready || current.Generation != snapshot.Generation || ctx.Err() != nil || !r.allowed(c, action) || now.Before(snapshot.Started) || now.Sub(snapshot.Started) >= recoverySuggestionMaxAge {
-		return empty
-	}
 	choices := make([]*discordgo.ApplicationCommandOptionChoice, 0, len(matches))
 	for _, u := range matches {
 		choices = append(choices, recoveryChoice(u))
@@ -321,9 +403,41 @@ func (r *recoveryService) autocompleteChoices(ctx context.Context, c recoveryCon
 	return choices
 }
 
+// Every request checks caller/guild/channel/feature authorization before touching
+// the snapshot or scheduling work. A fresh verified snapshot never waits for
+// Authentik; a cold one waits only for the bounded directory read.
+func (r *recoveryService) autocompleteChoices(ctx context.Context, c recoveryContext, action, query string) []*discordgo.ApplicationCommandOptionChoice {
+	empty := []*discordgo.ApplicationCommandOptionChoice{}
+	if !r.allowed(c, action) || !utf8.ValidString(query) || utf8.RuneCountInString(query) > 150 || strings.ContainsAny(query, "\x00\r\n") || ctx.Err() != nil {
+		return empty
+	}
+	r.suggestMu.Lock()
+	snapshot := r.suggestions
+	r.suggestMu.Unlock()
+	now := r.now()
+	if !snapshot.Ready || now.Before(snapshot.Started) || now.Sub(snapshot.Started) >= recoverySuggestionMaxAge {
+		users, ok := r.directorySuggestions(ctx)
+		r.requestAutocompleteRefresh()
+		if !ok || ctx.Err() != nil || !r.allowed(c, action) {
+			return empty
+		}
+		return matchRecoverySuggestions(users, query)
+	}
+	choices := matchRecoverySuggestions(snapshot.Users, query)
+	r.suggestMu.Lock()
+	current := r.suggestions
+	r.suggestMu.Unlock()
+	now = r.now()
+	if !current.Ready || current.Generation != snapshot.Generation || ctx.Err() != nil || !r.allowed(c, action) || now.Before(snapshot.Started) || now.Sub(snapshot.Started) >= recoverySuggestionMaxAge {
+		return empty
+	}
+	return choices
+}
+
 func handleRecoveryAutocomplete(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	// Autocomplete cannot be deferred. Serve only the bounded in-memory snapshot;
-	// never wait for Authentik or call the legacy autocomplete handler.
+	// Autocomplete cannot be deferred (3-second limit). Serve the in-memory snapshot,
+	// or wait at most this budget for the bounded directory read; never call the
+	// legacy autocomplete handler.
 	ctx, cancel := context.WithTimeout(context.Background(), recoveryAutocompleteBudget)
 	defer cancel()
 	choices := []*discordgo.ApplicationCommandOptionChoice{}

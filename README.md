@@ -597,13 +597,18 @@ Shared-role permission reads are deduplicated by role UUID and visibility
 mode within that one scan, including single-flight error results. This memo is
 fresh for every scan and exists only on its cloned API client; credential identity,
 user records and effective role membership are not memoized. Preview, confirmation
-and execution use the original uncached client and repeat full grant checks. Failed refreshes clear the snapshot; startup and expired caches return
-no suggestions while a requested scan runs. After opening a cold picker, allow
-the scan to finish and type again to see suggestions; exact username entry also
-works without waiting for the picker. API authentication/permission denials stop
-refreshes until restart. Other failures impose a 30-second backoff, after which
+and execution use the original uncached client and repeat full grant checks. Failed refreshes clear the snapshot.
+While the verified snapshot is cold or expired (the full scan takes tens of
+seconds), the picker instead shows a **directory**: one bounded user-list read
+filtered by the same local account checks (active, non-superuser, human type,
+not immutable/system/service) but without the role/permission scan. The first
+request waits at most 1.8 seconds for it, within Discord's 3-second limit; the
+read continues afterwards and is shared for 90 seconds. A role-privileged account
+can therefore appear until the verified snapshot replaces the directory, but
+selecting it is denied by preview's full check. API authentication/permission
+denials stop directory reads and refreshes until restart. Other failures impose a 30-second backoff, after which
 another authorized request is required to retry. There is no periodic refresh or
-automatic retry, and concurrent requests share one scan without waiting on HTTP.
+automatic retry, and concurrent requests share one directory read and one scan.
 An account promoted or deleted after a scan can briefly remain visible, but the
 cache never authorizes recovery: preview, confirmation and execution still check
 caller/target eligibility afresh. This suggestion-only staleness is intentional.

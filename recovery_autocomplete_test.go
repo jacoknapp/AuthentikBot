@@ -183,6 +183,21 @@ func (a *autocompleteFixture) waitForRefresh() {
 	a.f.t.Fatal("demand refresh did not finish")
 }
 
+func (a *autocompleteFixture) waitForDirectory() {
+	a.f.t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		a.f.r.suggestMu.Lock()
+		busy := a.f.r.directoryDone != nil
+		a.f.r.suggestMu.Unlock()
+		if !busy {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	a.f.t.Fatal("directory read did not finish")
+}
+
 func (a *autocompleteFixture) startDemandCache() context.CancelFunc {
 	a.f.t.Helper()
 	a.f.r.now = time.Now
@@ -541,8 +556,8 @@ func TestRecoveryAutocompleteDemandRefreshAndConcurrency(t *testing.T) {
 		t.Fatal("startup queried Authentik without demand")
 	}
 	start := time.Now()
-	if len(a.choices("")) != 0 || time.Since(start) > 100*time.Millisecond {
-		t.Fatal("cold picker waited for HTTP")
+	if len(a.choices("")) != 10 || time.Since(start) > 500*time.Millisecond {
+		t.Fatal("cold picker did not show directory names promptly")
 	}
 	var wg sync.WaitGroup
 	for n := 0; n < 100; n++ {
@@ -554,7 +569,8 @@ func TestRecoveryAutocompleteDemandRefreshAndConcurrency(t *testing.T) {
 	}
 	wg.Wait()
 	a.waitForRefresh()
-	if a.scans.Load() != 1 || a.maxActive.Load() > 4 || len(a.choices("")) != 10 {
+	// One directory read plus one verified scan.
+	if a.scans.Load() != 2 || a.maxActive.Load() > 4 || len(a.choices("")) != 10 {
 		t.Fatal("demand was not coalesced into one bounded scan")
 	}
 	before := a.calls.Load()
@@ -571,11 +587,11 @@ func TestRecoveryAutocompleteDemandRefreshAndConcurrency(t *testing.T) {
 	if a.calls.Load() != before {
 		t.Fatal("expiry refreshed without demand")
 	}
-	if len(a.choices("")) != 0 {
-		t.Fatal("expired suggestions were served")
+	if len(a.choices("")) != 10 || a.scans.Load() != 3 {
+		t.Fatal("expired picker did not reload the directory")
 	}
 	a.waitForRefresh()
-	if a.scans.Load() != 2 || len(a.choices("")) != 10 {
+	if a.scans.Load() != 4 || len(a.choices("")) != 10 {
 		t.Fatal("expired picker did not refresh on new demand")
 	}
 }
@@ -649,17 +665,20 @@ func TestRecoveryAutocompleteDemandFailureBackoff(t *testing.T) {
 	a.startDemandCache()
 	var offset atomic.Int64
 	a.f.r.now = func() time.Time { return time.Now().Add(time.Duration(offset.Load())) }
-	a.choices("")
+	if len(a.choices("")) != 1 {
+		t.Fatal("directory names missing while verified scan runs")
+	}
 	a.waitForRefresh()
 	for n := 0; n < 100; n++ {
 		a.choices("")
 	}
-	if a.calls.Load() != 1 {
+	// One directory read plus the failed verified scan's identity check.
+	if a.calls.Load() != 2 {
 		t.Fatal("failed demand caused a retry storm")
 	}
 	offset.Store(int64(recoverySuggestionRetryPause + time.Second))
 	time.Sleep(20 * time.Millisecond)
-	if a.calls.Load() != 1 {
+	if a.calls.Load() != 2 {
 		t.Fatal("backoff scheduled an automatic retry")
 	}
 	a.mu.Lock()
@@ -667,7 +686,7 @@ func TestRecoveryAutocompleteDemandFailureBackoff(t *testing.T) {
 	a.mu.Unlock()
 	a.choices("")
 	a.waitForRefresh()
-	if a.scans.Load() != 1 || len(a.choices("")) != 1 {
+	if a.scans.Load() != 2 || len(a.choices("")) != 1 {
 		t.Fatal("new demand after backoff did not recover")
 	}
 }
@@ -711,9 +730,10 @@ func TestRecoveryAutocompleteDemandLifetime(t *testing.T) {
 	t.Run("stops with service", func(t *testing.T) {
 		a := newAutocompleteFixture(t, 1)
 		started := make(chan struct{})
+		var once sync.Once
 		a.f.r.api.client.Transport = mockRoundTripper(func(req *http.Request) (*http.Response, error) {
 			a.calls.Add(1)
-			close(started)
+			once.Do(func() { close(started) })
 			<-req.Context().Done()
 			return nil, req.Context().Err()
 		})
@@ -726,9 +746,12 @@ func TestRecoveryAutocompleteDemandLifetime(t *testing.T) {
 		}
 		cancel()
 		a.waitForRefresh()
+		a.waitForDirectory()
+		before := a.calls.Load()
 		a.choices("")
 		a.waitForRefresh()
-		if a.calls.Load() != 1 {
+		a.waitForDirectory()
+		if before > 2 || a.calls.Load() != before {
 			t.Fatal("canceled service started more work")
 		}
 	})
@@ -744,7 +767,65 @@ func TestRecoveryAutocompleteDemandCachesEmptyResult(t *testing.T) {
 		a.choices("")
 	}
 	a.waitForRefresh()
-	if a.scans.Load() != 1 || a.calls.Load() != before {
+	if a.scans.Load() != 2 || a.calls.Load() != before {
 		t.Fatal("valid empty result was treated as an expired cache")
+	}
+}
+
+// Regression: a cold picker used to return nothing while the ~25-second verified
+// scan ran, and Discord does not re-query until the caller types again.
+func TestRecoveryAutocompleteColdPickerShowsDirectory(t *testing.T) {
+	a := newAutocompleteFixture(t, 3)
+	a.users[1].Super = flag(true)
+	a.users[2].Username = "jacob"
+	a.admin[44] = true
+	a.f.r.cfg.Immutable["jacob"] = true
+	a.startDemandCache()
+	got := a.choices("")
+	if len(got) != 1 || got[0].Name != "human-000" {
+		t.Fatal("cold picker did not list locally eligible names", len(got))
+	}
+	a.mu.Lock()
+	a.users[0].Username = "renamed"
+	a.mu.Unlock()
+	if got = a.choices("human"); len(got) != 1 {
+		t.Fatal("fresh directory was not reused")
+	}
+	a.waitForRefresh()
+	if a.writes.Load() != 0 {
+		t.Fatal("directory mutated Authentik")
+	}
+}
+
+func TestRecoveryAutocompleteDirectorySelectionStillRevalidates(t *testing.T) {
+	a := newAutocompleteFixture(t, 2)
+	a.admin[43] = true
+	a.startDemandCache()
+	got := a.choices("human-001")
+	if len(got) != 1 || got[0].Value != "ak-user:43" {
+		t.Fatal("directory omitted role-only candidate before verification")
+	}
+	if _, _, err := a.f.r.preview(a.f.ctx, emailAction, got[0].Value.(string)); err == nil {
+		t.Fatal("directory suggestion bypassed full eligibility check")
+	}
+	a.waitForRefresh()
+	if got = a.choices(""); len(got) != 1 || got[0].Value != "ak-user:42" {
+		t.Fatal("verified snapshot did not replace directory")
+	}
+}
+
+func TestRecoveryAutocompleteDirectoryWaitIsBounded(t *testing.T) {
+	a := newAutocompleteFixture(t, 1)
+	a.delay = 300 * time.Millisecond
+	a.startDemandCache()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if len(a.f.r.autocompleteChoices(ctx, a.f.ctx, emailAction, "")) != 0 || time.Since(start) > 200*time.Millisecond {
+		t.Fatal("directory wait exceeded interaction budget")
+	}
+	a.waitForDirectory()
+	if len(a.choices("")) != 1 {
+		t.Fatal("directory read abandoned when interaction expired")
 	}
 }
