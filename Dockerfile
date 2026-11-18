@@ -22,7 +22,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o authentik-bot .
 # Runtime stage
 FROM alpine:3.21
 
-RUN adduser -D -g "" appuser
+RUN apk upgrade --no-cache && adduser -D -g "" appuser
 
 WORKDIR /home/appuser
 
